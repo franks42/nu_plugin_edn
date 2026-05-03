@@ -19,9 +19,14 @@ Clojure-shaped pipelines.
 
 ## Status
 
-Early — `from edn` works for common shapes; `to edn` is still on the
-roadmap. See `CLAUDE.md` for the development plan and `bb-prototype-notes.md`
-for protocol-level notes.
+Both directions work. `from edn` is feature-complete (single-form, multi-
+form `--lines`/`--objects`, true incremental streaming over piped
+producers). `to edn` is shipped with the basic shape — keyword-keyed
+records, vectors, scalar fallbacks for Nushell-native types — and a
+handful of planned flags (`--pretty`, `--meta`, `--lines`, `--keep-
+keyword-prefix`, `--string-keys`) on the roadmap. See `CLAUDE.md` for
+the development plan and `bb-prototype-notes.md` for protocol-level
+notes.
 
 ## Requirements
 
@@ -70,19 +75,51 @@ open config.edn | get :database
 # Multi-form input: parse a sequence of top-level EDN forms.
 # Each `(prn ...)` in the producer becomes one row; `first N` short-circuits.
 bb -e '(doseq [event (events)] (prn event))' | from edn --lines | first 10
+
+# `to edn` — emit Nushell values as EDN text
+{name: "alice" age: 30} | to edn
+# => {:name "alice", :age 30}
+
+[{n: 1} {n: 2} {n: 3}] | to edn
+# => [{:n 1} {:n 2} {:n 3}]
+
+# End-to-end round-trip through bb on both sides
+bb produce.clj | from edn | where size > 1000 | sort-by size | to edn | bb consume.clj
 ```
+
+## Type mappings (`to edn`)
+
+| Nushell type      | EDN output                | Notes                          |
+|-------------------|---------------------------|--------------------------------|
+| `Nothing`         | `nil`                     |                                |
+| `Bool`            | `true` / `false`          |                                |
+| `Int`             | integer                   |                                |
+| `Float`           | float                     |                                |
+| `String`          | `"..."`                   |                                |
+| `Date`            | `#inst "..."`             | round-trips                    |
+| `Record`          | `{:k v ...}`              | keyword keys                   |
+| `List` / table    | `[v ...]`                 |                                |
+| `Duration`        | integer milliseconds      | lossy: ns precision dropped    |
+| `Filesize`        | integer bytes             | unit dropped                   |
+| `Binary`          | base64 string             | not a tagged literal           |
+| `Range`, `Closure`, `CellPath`, `CustomValue`, `Error` | `"#<TypeName>"` placeholder | best-effort, not round-trippable |
 
 ## Known limitations
 
-- **No `to edn` yet**: only the parsing direction is implemented.
-- **Whole-document buffer**: byte stream input is consumed into memory
-  before parsing. Fine for configs (KB-MB), not ideal for log-sized
-  inputs. An EDN-per-line streaming mode is on the roadmap.
+- **Single-form `from edn` buffers the input**: a whole-document
+  `from edn` (without `--lines`) reads the entire byte stream into
+  memory before parsing. Fine for configs; for log-sized single
+  documents, prefer multi-form mode (`--lines`) which is fully
+  incremental.
 - **Errors lack source spans**: parse errors show a message but don't
   highlight the offending location in the input.
-- **Keyword round-trip**: keywords stringify to bare strings (`:file`
-  → `"file"`, namespaces preserved), which is ergonomic but loses the
-  keyword/string distinction. A `--keep-keyword-prefix` flag is planned.
+- **Keyword round-trip**: `from edn` strips the leading colon
+  (`:file` → `"file"`, namespaces preserved); `to edn` emits all
+  string-shaped fields as plain strings. A `--keep-keyword-prefix`
+  flag pair is planned to opt into fidelity.
+- **`to edn` types**: see the type-mappings table above. Nushell
+  durations, filesizes, and binaries fall back to primitives — lossy
+  by design.
 
 ## Development
 
@@ -92,7 +129,10 @@ for protocol findings. Convenience tasks via `bb`:
 ```bash
 bb register   # plugin add ./nu_plugin_edn
 bb test       # run the integration test suite
-bb check      # lint with clj-kondo (if installed)
+bb lint       # clj-kondo
+bb fmt        # apply cljfmt
+bb fmt-check  # verify cljfmt formatting (CI-friendly)
+bb check      # lint + fmt-check, the pre-commit task
 ```
 
 ## License

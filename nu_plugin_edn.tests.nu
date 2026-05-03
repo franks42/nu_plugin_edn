@@ -143,6 +143,68 @@ check "lines: large producer + first N is correct" (
     | from edn --lines | first 5 | get i | math sum
 ) 10
 
+# --- to edn ---
+# Record -> map with keyword keys, list -> vector, nested -> nested.
+
+check "to edn: scalar int"   (42 | to edn) "42"
+check "to edn: scalar nil"   (null | to edn) "nil"
+check "to edn: scalar str"   ("hello" | to edn) '"hello"'
+check "to edn: empty record" ({} | to edn) "{}"
+check "to edn: empty list"   ([] | to edn) "[]"
+
+# Records use keyword keys (the chosen default — matches Clojure idiom
+# and the cljsh receive-side). The exact key order is preserved by the
+# Nushell record's natural iteration order.
+check "to edn: simple record" (
+    {name: "alice"} | to edn
+) '{:name "alice"}'
+
+check "to edn: list of records" (
+    [{n: 1} {n: 2}] | to edn
+) "[{:n 1} {:n 2}]"
+
+check "to edn: nested" (
+    {users: [{name: "a"} {name: "b"}], count: 2} | to edn
+) '{:users [{:name "a"} {:name "b"}], :count 2}'
+
+# Nushell-native types fall back to primitives. These are lossy by
+# design — see CLAUDE.md / README. Tests pin the chosen mapping so it
+# doesn't drift.
+check "to edn: filesize -> bytes int" (
+    {sz: 1MiB} | to edn
+) "{:sz 1048576}"
+
+check "to edn: duration -> ms int" (
+    {d: 1sec} | to edn
+) "{:d 1000}"
+
+check "to edn: date -> #inst" (
+    {at: 2024-01-15T10:30:00Z} | to edn
+) '{:at #inst "2024-01-15T10:30:00.000-00:00"}'
+
+# Round-trip: a Nushell value passed through to edn | from edn should
+# come back equal (modulo type coercions documented above — keywords
+# come back as plain strings without the colon, so we test with shapes
+# that stay invariant).
+check "to edn -> from edn round-trip: simple" (
+    {a: 1, b: [1 2 3]} | to edn | from edn
+) {a: 1, b: [1 2 3]}
+
+check "to edn -> from edn round-trip: nested record" (
+    {x: {y: {z: "deep"}}} | to edn | from edn
+) {x: {y: {z: "deep"}}}
+
+# The cljsh round-trip: bb produces EDN, Nushell filters/sorts, emits
+# EDN back. End-to-end shape preservation is what matters.
+check "to edn: cljsh round-trip" (
+    bb -e '(prn [{:filename "a.txt" :size 100} {:filename "b.txt" :size 200}])'
+    | from edn
+    | where size > 50
+    | to edn
+    | from edn
+    | get filename
+) ["a.txt", "b.txt"]
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

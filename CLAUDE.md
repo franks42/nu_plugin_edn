@@ -65,26 +65,40 @@ If this plugin gets traction and the bb startup cost or dependency becomes a rea
 
 ## What's in the box
 
-- `nu_plugin_edn` — the plugin itself, executable bb script. Past prototype: handles the protocol, all common EDN shapes, multi-form mode, and incremental streaming. Tagged `v0.1.0`.
-- `nu_plugin_edn.tests.nu` — Nushell integration tests (currently 34 cases, all passing on Nushell 0.112.2).
-- `bb.edn` — bb task entry points: `bb register`, `bb test`, `bb check` (clj-kondo if installed). No external `:deps` — the plugin uses only libraries bundled with babashka (`clojure.edn`, `cheshire`).
-- `bb-prototype-notes.md` — protocol-level findings: handshake gotchas, ByteStream input, ListStream output, incremental-streaming machinery, bb-proxy quirks. Living document — append to it as you learn.
-- `README.md` — user-facing docs and install instructions.
+- `nu_plugin_edn` — the plugin itself, executable bb script. Two commands registered (`from edn`, `to edn`), full protocol handshake, ByteStream input + ListStream input/output, multi-form mode with true incremental streaming. Latest tag: `v0.3.0`.
+- `nu_plugin_edn.tests.nu` — Nushell integration tests (47 cases, all passing on Nushell 0.112.2).
+- `bb.edn` — bb task entry points: `bb register`, `bb test`, `bb lint`, `bb fmt`, `bb fmt-check`, `bb check` (`lint` + `fmt-check` together — the pre-commit task). No external `:deps` — the plugin uses only libraries bundled with babashka (`clojure.edn`, `cheshire`).
+- `bb-prototype-notes.md` — protocol-level findings: handshake gotchas, ByteStream input, ListStream input/output, incremental-streaming machinery, bb-proxy quirks. Living document — append to it as you learn.
+- `README.md` — user-facing docs, install instructions, and `to edn` type-mappings table.
 - `LICENSE` — MIT.
 - `CHANGELOG.md` — Keep-a-Changelog format, `[Unreleased]` section maintained as features land.
 
 ## What's working
 
-- Plugin handshake (encoding declaration, Hello exchange, Metadata, Signature, Run, Goodbye).
-- `from edn` for: maps, vectors, strings, integers, floats, booleans, nil, sets (rendered as Nushell lists since Nushell has no set type), nested values, symbols (as strings), keywords.
+### Protocol layer
+- Handshake (encoding declaration, Hello, Metadata, Signature, Run, Goodbye).
+- ByteStream input (buffered single-form path; truly incremental for `--lines`/`--objects`).
+- ListStream input (collected to a list before serialization in `to edn`).
+- ListStream output (forms emitted as they're parsed in `from edn --lines`).
+
+### `from edn`
+- All standard EDN shapes: maps, vectors, lists, sets (rendered as Nushell lists since Nushell has no set type), strings, ints, floats, booleans, nil, symbols (as strings), keywords, nested.
 - **Keyword stringification**: leading colon dropped, namespace preserved (`:file` → `"file"`, `:foo/bar` → `"foo/bar"`). Implemented as `(subs (str v) 1)` — deliberately not `(name v)`, which would silently strip namespaces.
-- **Input shapes handled**:
-  - `Empty` (no upstream)
-  - `Value` (in-memory String, e.g. literal `'edn-text' | from edn`)
-  - `ByteStream` (piped external stdout). For single-form mode this is buffered to a string; for `--lines`/`--objects` it's consumed truly incrementally.
-- **Multi-form mode** via `--lines` (`-l`) or `--objects` (`-o`): parses every top-level form from the input, emits each through a `ListStream`. Form boundaries come from the EDN reader (matched brackets, quoted strings, comments stripped) — not newlines — so multi-line forms and `;` comments work transparently.
-- **True incremental streaming** for `--lines` over `ByteStream`: bytes are pulled on demand via a custom `InputStream` proxy, forms are emitted as they're parsed, and a downstream `:Drop` on our output triggers a `:Drop` on the input so the engine can tear down unbounded producers.
-- **`open file.edn`** auto-parses via the registered command — a free side-effect of registration; no explicit `from edn` needed.
+- **Input shapes**: `Empty`, `Value` (literal string), `ByteStream` (piped external stdout). For single-form mode `ByteStream` is buffered to a string; for `--lines`/`--objects` it's consumed truly incrementally.
+- **Multi-form mode** via `--lines` (`-l`) or `--objects` (`-o`): parses every top-level form, emits each through a `ListStream`. Form boundaries come from the EDN reader — not newlines — so multi-line forms and `;` comments work transparently.
+- **`open file.edn`** auto-parses via the registered command; no explicit `from edn` needed.
+
+### `to edn`
+- Records → maps with **keyword keys** (`{:name "alice"}`), the chosen default for cljsh ergonomics.
+- Lists / tables → vectors of maps.
+- `Nothing` → `nil`. `Date` → `#inst "..."` (round-trips).
+- Nushell-native types without an EDN equivalent fall back to primitives:
+  - Duration → integer milliseconds (lossy: ns precision dropped).
+  - Filesize → integer bytes (unit dropped).
+  - Binary → base64 string (not a tagged literal).
+- Range, Closure, CellPath, CustomValue, Error → `#<TypeName>` placeholder string so the user sees what was lost.
+- **Input shapes**: `Empty`, `Value`, `ListStream` (collected). `ByteStream` rejected with a clear error (raw bytes don't make sense for serialization).
+- Built on `pr-str` — no custom serializer, no puget dependency.
 
 ## What's not working / needs implementing
 
@@ -96,21 +110,24 @@ Resolved: drop the leading colon by default, preserve namespace. `:file` → `"f
 
 Tradeoff accepted: round-trip fidelity is lost (a Nushell `"file"` could have started life as either an EDN string or an EDN keyword). The opt-in fidelity escape hatch — a `--keep-keyword-prefix` flag on both `from edn` and `to edn` — is on the roadmap; see section 2 (Planned flags).
 
-### 2. `to edn` (reverse direction)
+### 2. `to edn` (reverse direction) — DONE (basic)
 
-The prototype only does `from edn`. Implementing `to edn` is a mirror image of the conversion logic plus EDN serialization. Cheshire doesn't emit EDN; you'll write the serializer (or use [puget](https://github.com/greglook/puget) if it works in bb — verify, don't assume).
+Shipped. Records emit as maps with keyword keys (`{:name "alice"}`); lists/tables become vectors; `Nothing` → `nil`; `Date` → `#inst`. Built on `pr-str` — no custom serializer, no puget dependency. Accepts `Value`, `ListStream` (collected first), and `Empty` inputs.
 
-Implementation hints:
-- Nushell records → EDN maps. Choose: keyword keys (`{:name "alice"}`) or string keys (`{"name" "alice"}`)?
-- Nushell lists → EDN vectors.
-- Nushell tables (lists of records) → EDN vectors of maps.
-- Nushell `Nothing` → EDN `nil`.
-- Nushell `Date` → EDN `#inst "..."`.
-- Don't try to round-trip nuon-specific types (durations, file sizes); document the limitation.
+Type fallback policy chosen for Nushell-native types without an EDN equivalent:
+- Duration (nanoseconds) → integer milliseconds.
+- Filesize → integer bytes.
+- Binary → base64 string.
+- Range / Closure / CellPath / CustomValue / Error → `#<TypeName>` placeholder string so the user sees what was lost.
 
-Planned flags for `to edn`:
+Lossy by design — round-tripping these specific types isn't supported and isn't planned. A user who needs them can wrap manually before `to edn`.
+
+Planned flags (not yet implemented):
+- `--pretty` (`-p`) — pprint output instead of `pr-str` compact. Probably needs `clojure.pprint`; check that bb's pprint behaves correctly with the EDN reader literals (`#inst`, `#uuid`).
 - `--meta <record>` — prefix the emitted top-level form with Clojure-reader-style metadata: `{a: 1} | to edn --meta {source: "nu", at: (date now)}` emits `^{:source "nu" :at #inst "..."} {:a 1}`. Useful for attaching provenance/context that a bb script on the receiving end can pick up via `(meta v)`. **Caveat**: `^{...}` is Clojure-reader syntax, not in the EDN spec proper — non-Clojure EDN parsers (Python, JS, Go) will reject it. Document this loudly. For pipelines that may reach non-Clojure consumers, the portable alternative is to wrap manually: `{context: {...} data: $val} | to edn`. We're not adding a separate `--wrap` flag for that — the wrap pattern is one line of Nushell, no plugin help needed.
 - `--keep-keyword-prefix` — opt-in keyword-fidelity emission, the inverse of the `from edn` flag of the same name. When set, strings that round-trip from EDN keywords (currently a string with no leading colon, no spaces) get re-emitted as keywords. Probably needs a heuristic on the producer side (e.g. only known field names) since pure strings and ex-keywords are indistinguishable in Nushell.
+- `--string-keys` — emit `{"name" "alice"}` instead of `{:name "alice"}`. For pipelines feeding non-Clojure EDN parsers that don't like keyword keys.
+- `--lines` — emit each list element as its own top-level form rather than wrapping in a vector. Mirror of `from edn --lines`.
 
 ### 3. Streaming input
 
@@ -130,9 +147,9 @@ Two distinct gaps:
 
 ### 5. Plugin signature and metadata
 
-Done: `from edn` has a description, `:search_terms ["edn" "clojure" "parse"]`, `:category "Formats"`, the `--lines` and `--objects` flags with descriptions.
+Done: both commands have descriptions, search terms, category `"Formats"`, and registered flags. `:Metadata` reports the current release version. Both signatures live as named defs (`from-edn-sig`, `to-edn-sig`) at the top of the dispatch block so they're easy to extend.
 
-Still missing: `:examples` is empty. The protocol supports inline examples that surface in `help from edn`; populating it (literal-string parses, the cljsh use case, `--lines` over a bb pipe) is a small, high-value polish task. `:Metadata` response also still uses a placeholder `{:version "0.1.0"}` — should track the actual release version and add author/description fields when `to edn` lands.
+Still missing: `:examples` is empty for both commands. The protocol supports inline examples that surface in `help from edn` / `help to edn`; populating them (literal-string parses, the cljsh round-trip, `--lines` over a bb pipe, `to edn` of a record/table) is a small, high-value polish task. Author field on `:Metadata` is also unset.
 
 ### 6. Plugin registry conventions
 
@@ -161,20 +178,21 @@ These are real and will bite again:
 
 `bb test` runs the suite (`nu nu_plugin_edn.tests.nu` directly works too — bb is just the convenience entry point). The plugin must be registered first via `bb register`.
 
-What the suite covers today (34 cases passing on 0.112.2):
+What the suite covers today (47 cases passing on 0.112.2):
 
-- Scalars: int, float, bool, string, nil.
-- Collections: vector, map, list (sets are converted to lists, no separate test).
-- Nested structures, the cljsh use case (`[{:filename ... :size ... :type ...} ...]`).
-- Keyword stringification: colon dropped, namespace preserved.
-- ByteStream input: from `^echo`, from `bb -e`, large input (1000 records), `open` of a `.txt` file.
-- Multi-form mode: scalar count, mixed shapes, `--objects` alias, multi-line forms, comment stripping, streamed bb output, record extraction, `first N` short-circuit, large producer (5000 records) + `first N` correctness.
+- **`from edn` scalars**: int, float, bool, string, nil.
+- **`from edn` collections**: vector, map, list (sets are converted to lists, no separate test).
+- **`from edn` nested structures**, the cljsh use case (`[{:filename ... :size ... :type ...} ...]`).
+- **Keyword stringification**: colon dropped, namespace preserved.
+- **ByteStream input**: from `^echo`, from `bb -e`, large input (1000 records), `open` of a `.txt` file.
+- **Multi-form mode (`--lines`/`--objects`)**: scalar count, mixed shapes, alias equivalence, multi-line forms, comment stripping, streamed bb output, record extraction, `first N` short-circuit, large producer (5000 records) + `first N` correctness.
+- **`to edn`**: scalars (int, nil, string, empty record, empty list), simple record, list of records, nested, native-type fallbacks (filesize, duration, date), round-trips (simple, nested), end-to-end cljsh round-trip (bb → from edn → where → to edn → from edn).
 
 Gaps (deliberately or as TODO):
-- **Round-trip tests** (`value | to edn | from edn == value`) — waiting on `to edn`.
-- **Error-case tests** — malformed EDN, missing closing brace, truncated input. The test file admits this gap in a comment.
+- **Error-case tests** — malformed EDN, missing closing brace, truncated input. The test file admits this gap in a comment. Add when error reporting (section 4) gets source spans.
 - **Megabyte-scale streaming tests** — current largest is 5000 records (~30 KB).
 - **Unbounded producer + `first N`** — works correctness-wise, but bb itself doesn't die on EPIPE so the test would leak processes; needs a non-bb producer (`yes`, `tail -f`) to be reliable.
+- **Per-flag tests** for the planned `to edn` flags (`--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`) — add as each lands.
 
 A test fails if its expected output doesn't match. Don't catch and ignore errors in tests — let them fail loud.
 
@@ -188,11 +206,11 @@ History: anchor moved 0.110.0 → 0.112.2 after inspecting `git log 0.110.0..0.1
 
 ## What success looks like
 
-- `from edn` and `to edn` work as drop-in pipeline commands.
-- A Clojure user can `bb my-script.clj | from edn | where size > 1000 | sort-by size` and it just works.
-- A bb script can be the source AND target of an EDN pipeline: `bb produce.clj | from edn | where ... | to edn | bb consume.clj`.
-- The plugin is in the awesome-nu registry.
-- Issue #6415 gets a "fixed by external plugin" reference.
+- ✅ `from edn` and `to edn` work as drop-in pipeline commands.
+- ✅ A Clojure user can `bb my-script.clj | from edn | where size > 1000 | sort-by size` and it just works.
+- ✅ A bb script can be the source AND target of an EDN pipeline: `bb produce.clj | from edn | where ... | to edn | bb consume.clj`.
+- ⏳ The plugin is in the awesome-nu registry. (Submission needs a `language: clojure` PR to their `config.yaml` schema first — none of the existing accepted languages applies.)
+- ⏳ Issue #6415 gets a "fixed by external plugin" reference. (To be commented once awesome-nu submission lands.)
 
 ## What success does NOT require
 

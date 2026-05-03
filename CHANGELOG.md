@@ -8,7 +8,30 @@ once a 1.0 ships.
 
 ## [Unreleased]
 
-(Nothing yet. Planned: `to edn`; see CLAUDE.md roadmap.)
+(Nothing yet. Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. See CLAUDE.md §2.)
+
+## [0.3.0] — 2026-05-03 — `to edn` shipped, round-trip works
+
+The other half of the plugin: emit Nushell values as EDN text. With this milestone, the cljsh use case round-trips end-to-end — `bb produce.clj | from edn | where ... | to edn | bb consume.clj` Just Works.
+
+### Added
+- **`to edn` command** — serialize Nushell values back to EDN text.
+  - Records emit as maps with **keyword keys** by default (`{:name "alice"}`), matching Clojure idiom and what bb-side consumers expect.
+  - Lists and tables emit as vectors of maps.
+  - Date emits as `#inst "..."` literal (round-trips).
+  - Nushell-native types without an EDN equivalent fall back to primitives: durations → ms ints, filesizes → byte ints, binary → base64 strings. Lossy by design — README has the full type-mappings table.
+  - Closures, cell paths, ranges, custom values, and errors emit as `#<TypeName>` placeholder strings so the user sees what was lost.
+  - Accepts `Value`, `ListStream` (collected first — so `where ... | to edn` works), and `Empty` inputs. Rejects `ByteStream` with a clear error.
+- ListStream input handling on the plugin side, used by `to edn` to consume upstream filtered/transformed streams.
+- 13 new integration tests covering `to edn` shapes, native-type fallbacks, and the full cljsh round-trip. Suite is now 47 cases.
+- README: `to edn` examples, end-to-end round-trip example, full type-mappings table.
+
+### Planned for the next milestone
+- `to edn --pretty` — pprint output instead of `pr-str` compact.
+- `to edn --meta <record>` — Clojure-reader-style metadata prefix for the emitted top-level form (Clojure-only consumers; `^{...}` isn't EDN-spec).
+- `to edn --keep-keyword-prefix` and `from edn --keep-keyword-prefix` — paired flags for round-trip keyword fidelity.
+- `to edn --string-keys` — string-keyed maps for non-Clojure consumers.
+- `to edn --lines` — emit each list element as its own top-level form (mirror of `from edn --lines`).
 
 ## [0.2.0] — 2026-05-03 — `from edn` feature-complete
 

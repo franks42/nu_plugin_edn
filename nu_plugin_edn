@@ -7,9 +7,13 @@
 ;; Known limitations (see CLAUDE.md for the full list):
 ;;   - Keywords lose round-trip fidelity: `:file` -> "file" (colon dropped).
 ;;     A `--keep-keyword-prefix` flag is planned for opt-in fidelity.
-;;   - No `to edn` reverse direction yet
 ;;   - Errors don't carry source spans
 ;;   - No tagged-literal support beyond what edn/read-string handles natively
+;;   - `to edn` emits compact form via pr-str. Pretty-printing, --meta, and
+;;     --keep-keyword-prefix flags are planned (see CLAUDE.md roadmap).
+;;   - Nushell-native types without an EDN equivalent (Duration, Filesize,
+;;     Binary, etc.) emit primitive fallbacks: ms ints, byte ints, base64
+;;     strings. Best-effort, lossy, documented in README.
 ;;
 ;; Input handling:
 ;;   - String values (`'edn-text' | from edn`)            -> direct
@@ -87,6 +91,58 @@
       (sequential? v) {:List    {:vals (mapv ->nu-value v) :span span}}
       (set? v)        {:List    {:vals (mapv ->nu-value v) :span span}}
       :else           {:String  {:val (pr-str v) :span span}})))
+
+;; Inverse of ->nu-value: convert a Nushell wire-protocol Value back to
+;; a Clojure value suitable for `pr-str` to emit as EDN.
+;;
+;; Type policy (best-effort fallbacks for types EDN doesn't natively
+;; represent — documented in CLAUDE.md and README):
+;;   - Nothing               -> nil
+;;   - String/Bool/Int/Float -> identity
+;;   - Date                  -> java.util.Date (pr-str emits as #inst)
+;;   - Duration (nanoseconds)-> integer milliseconds
+;;   - Filesize (bytes)      -> integer bytes
+;;   - Binary                -> base64-encoded string
+;;   - Record                -> Clojure map with keyword keys (the
+;;                              JSON-parsed input already gives us
+;;                              keywords for free)
+;;   - List                  -> Clojure vector
+;;   - Range / Closure / CellPath / CustomValue / Error -> string
+;;     fallback marked with `#<...>` so the user sees what was lost
+(defn nu->clj [v]
+  (cond
+    (contains? v :Nothing)  nil
+    (contains? v :String)   (get-in v [:String :val])
+    (contains? v :Bool)     (get-in v [:Bool :val])
+    (contains? v :Int)      (get-in v [:Int :val])
+    (contains? v :Float)    (get-in v [:Float :val])
+
+    (contains? v :Date)
+    (java.util.Date/from
+     (java.time.Instant/parse (get-in v [:Date :val])))
+
+    (contains? v :Duration)
+    ;; Nushell durations are nanoseconds; ms is the most universally
+    ;; useful integer representation. Truncates sub-ms precision.
+    (long (/ (get-in v [:Duration :val]) 1000000))
+
+    (contains? v :Filesize)
+    (get-in v [:Filesize :val])
+
+    (contains? v :Binary)
+    (.encodeToString (java.util.Base64/getEncoder)
+                     (byte-array (mapv unchecked-byte
+                                       (get-in v [:Binary :val]))))
+
+    (contains? v :Record)
+    (into {} (for [[k vv] (get-in v [:Record :val])]
+               [k (nu->clj vv)]))
+
+    (contains? v :List)
+    (mapv nu->clj (get-in v [:List :vals]))
+
+    :else
+    (str "#<" (some-> v keys first name) ">")))
 
 ;; ByteStream input handling.
 ;;
@@ -358,78 +414,156 @@
     :else
     ""))
 
+(defn send-error-response [call-id msg]
+  (send-msg {:CallResponse
+             [call-id {:Error {:msg msg :labels [] :code nil
+                               :url nil :help nil :inner []}}]}))
+
+(def from-edn-sig
+  {:sig {:name "from edn"
+         :description "Parse text as EDN."
+         :extra_description "Converts EDN-formatted text into Nushell structured values."
+         :search_terms ["edn" "clojure" "parse"]
+         :required_positional []
+         :optional_positional []
+         :rest_positional nil
+         :named [{:long "help"    :short "h" :arg nil :required false
+                  :desc "Display help"
+                  :var_id nil :default_value nil}
+                 {:long "lines"   :short "l" :arg nil :required false
+                  :desc "Parse the input as a sequence of top-level EDN forms; emit each as a separate value (ListStream output)."
+                  :var_id nil :default_value nil}
+                 {:long "objects" :short "o" :arg nil :required false
+                  :desc "Alias for --lines (mirrors `from json --objects` naming)."
+                  :var_id nil :default_value nil}]
+         :input_output_types [["String" "Any"]]
+         :allow_variants_without_examples true
+         :is_filter false :creates_scope false :allows_unknown_args false
+         :category "Formats"}
+   :examples []})
+
+(def to-edn-sig
+  {:sig {:name "to edn"
+         :description "Convert a Nushell value to EDN text."
+         :extra_description "Records become maps with keyword keys; lists/tables become vectors. Nushell-native types without an EDN equivalent (Duration, Filesize, Binary) fall back to primitives — see README for the full table."
+         :search_terms ["edn" "clojure" "serialize" "emit"]
+         :required_positional []
+         :optional_positional []
+         :rest_positional nil
+         :named [{:long "help" :short "h" :arg nil :required false
+                  :desc "Display help"
+                  :var_id nil :default_value nil}]
+         :input_output_types [["Any" "String"]]
+         :allow_variants_without_examples true
+         :is_filter false :creates_scope false :allows_unknown_args false
+         :category "Formats"}
+   :examples []})
+
+(defn handle-from-edn [call-id run]
+  (let [input  (:input run)
+        named  (get-in run [:call :named])
+        multi? (or (flag-set? named "lines")
+                   (flag-set? named "objects"))]
+    (cond
+      ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
+      ;; Bytes are pulled on demand; forms are emitted as they're parsed.
+      (and multi? (map? input) (contains? input :ByteStream))
+      (emit-stream-incremental call-id (get-in input [:ByteStream :id]))
+
+      ;; Multi-form mode + non-stream input (Value / Empty)  ->
+      ;; buffer the string, parse all forms, emit as a ListStream.
+      multi?
+      (try
+        (emit-list-stream call-id (read-all-forms (extract-input input)))
+        (catch Throwable t
+          (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))
+
+      ;; Single-form mode (default)  ->  buffered, return a single Value.
+      :else
+      (try
+        (let [parsed (edn/read-string (extract-input input))]
+          (send-msg {:CallResponse
+                     [call-id
+                      {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
+        (catch Throwable t
+          (send-error-response call-id (str "EDN parse error: " (.getMessage t))))))))
+
+;; Collect a ListStream input into a vector of Values. The engine
+;; sends {:Data [<id> {:List <value>}]} messages until {:End <id>}.
+;; Used when `| where ...`, `| each ...`, etc. feeds `to edn` — those
+;; commands emit ListStreams, not in-memory Values.
+(defn read-list-stream [stream-id]
+  (loop [acc []]
+    (let [msg (read-msg)]
+      (cond
+        (nil? msg)
+        acc
+
+        (and (map? msg) (contains? msg :End))
+        acc
+
+        (and (map? msg) (contains? msg :Data))
+        (let [[id data] (:Data msg)]
+          (if (= id stream-id)
+            (do (send-msg {:Ack stream-id})
+                (recur (conj acc (:List data))))
+            (recur acc)))
+
+        :else (recur acc)))))
+
+(defn handle-to-edn [call-id run]
+  (let [input  (:input run)
+        nu-val (cond
+                 (= "Empty" input) nil
+
+                 (and (map? input) (contains? input :Value))
+                 (get-in input [:Value 0])
+
+                 ;; A ListStream from upstream `where` / `each` / etc.
+                 ;; gets collected into a List Value before serializing.
+                 (and (map? input) (contains? input :ListStream))
+                 {:List {:vals (read-list-stream (get-in input [:ListStream :id]))
+                         :span {:start 0 :end 0}}}
+
+                 ;; ByteStream input doesn't make sense for `to edn` —
+                 ;; the user wants to serialize a structured value, not
+                 ;; pass raw bytes through.
+                 :else
+                 ::unsupported)]
+    (if (= nu-val ::unsupported)
+      (send-error-response
+       call-id
+       "to edn requires a structured value or list-stream input (got raw bytes)")
+      (try
+        (let [clj-val (when (some? nu-val) (nu->clj nu-val))
+              edn-str (pr-str clj-val)
+              span    {:start 0 :end 0}]
+          (send-msg {:CallResponse
+                     [call-id
+                      {:PipelineData
+                       {:Value [{:String {:val edn-str :span span}} nil]}}]}))
+        (catch Throwable t
+          (send-error-response call-id (str "EDN serialization error: " (.getMessage t))))))))
+
 (defn handle-call [call-id call-data]
   (cond
     (= "Metadata" call-data)
-    (send-msg {:CallResponse [call-id {:Metadata {:version "0.2.0"}}]})
+    (send-msg {:CallResponse [call-id {:Metadata {:version "0.3.0"}}]})
 
     (= "Signature" call-data)
-    (send-msg
-     {:CallResponse
-      [call-id
-       {:Signature
-        [{:sig {:name "from edn"
-                :description "Parse text as EDN."
-                :extra_description "Converts EDN-formatted text into Nushell structured values."
-                :search_terms ["edn" "clojure" "parse"]
-                :required_positional []
-                :optional_positional []
-                :rest_positional nil
-                :named [{:long "help"    :short "h" :arg nil :required false
-                         :desc "Display help"
-                         :var_id nil :default_value nil}
-                        {:long "lines"   :short "l" :arg nil :required false
-                         :desc "Parse the input as a sequence of top-level EDN forms; emit each as a separate value (ListStream output)."
-                         :var_id nil :default_value nil}
-                        {:long "objects" :short "o" :arg nil :required false
-                         :desc "Alias for --lines (mirrors `from json --objects` naming)."
-                         :var_id nil :default_value nil}]
-                :input_output_types [["String" "Any"]]
-                :allow_variants_without_examples true
-                :is_filter false :creates_scope false :allows_unknown_args false
-                :category "Formats"}
-          :examples []}]}]})
+    (send-msg {:CallResponse
+               [call-id {:Signature [from-edn-sig to-edn-sig]}]})
 
     (and (map? call-data) (contains? call-data :Run))
-    (let [run    (:Run call-data)
-          input  (:input run)
-          named  (get-in run [:call :named])
-          multi? (or (flag-set? named "lines")
-                     (flag-set? named "objects"))]
-      (cond
-        ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
-        ;; Bytes are pulled on demand; forms are emitted as they're parsed.
-        (and multi? (map? input) (contains? input :ByteStream))
-        (emit-stream-incremental call-id (get-in input [:ByteStream :id]))
-
-        ;; Multi-form mode + non-stream input (Value / Empty)  ->
-        ;; buffer the string, parse all forms, emit as a ListStream.
-        multi?
-        (try
-          (emit-list-stream call-id (read-all-forms (extract-input input)))
-          (catch Throwable t
-            (send-msg {:CallResponse
-                       [call-id
-                        {:Error {:msg (str "EDN parse error: " (.getMessage t))
-                                 :labels [] :code nil :url nil :help nil :inner []}}]})))
-
-        ;; Single-form mode (default)  ->  buffered, return a single Value.
-        :else
-        (try
-          (let [parsed (edn/read-string (extract-input input))]
-            (send-msg {:CallResponse
-                       [call-id
-                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
-          (catch Throwable t
-            (send-msg {:CallResponse
-                       [call-id
-                        {:Error {:msg (str "EDN parse error: " (.getMessage t))
-                                 :labels [] :code nil :url nil :help nil :inner []}}]})))))
+    (let [run  (:Run call-data)
+          name (:name run)]
+      (case name
+        "from edn" (handle-from-edn call-id run)
+        "to edn"   (handle-to-edn call-id run)
+        (send-error-response call-id (str "unknown command: " name))))
 
     :else
-    (send-msg {:CallResponse
-               [call-id {:Error {:msg (str "unhandled call: " (pr-str call-data))
-                                 :labels [] :code nil :url nil :help nil :inner []}}]})))
+    (send-error-response call-id (str "unhandled call: " (pr-str call-data)))))
 
 ;; Main loop.
 (loop []
