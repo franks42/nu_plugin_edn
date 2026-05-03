@@ -1,0 +1,20 @@
+;; bb.edn — task entry points for nu_plugin_edn.
+;;
+;; The plugin itself uses only libraries bundled with babashka
+;; (clojure.edn, cheshire), so no :deps are needed here. This file
+;; exists to give contributors a familiar `bb <task>` interface.
+
+{:min-bb-version "1.3.0"
+
+ :tasks
+ {test
+  {:doc  "Run the Nushell integration tests. Requires the plugin to have been registered with `bb register` first."
+   :task (shell "nu nu_plugin_edn.tests.nu")}
+
+  register
+  {:doc  "Register the plugin with Nushell (persists to plugin.msgpackz)."
+   :task (shell "nu -c \"plugin add ./nu_plugin_edn\"")}
+
+  check
+  {:doc  "Lint the plugin source with clj-kondo. The plugin file has no extension, so we hint --lang clj."
+   :task (shell "clj-kondo --lint nu_plugin_edn --lang clj")}}}

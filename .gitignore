@@ -12,3 +12,9 @@ pom.xml.asc
 .lein-failures
 .nrepl-port
 .cpcache/
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store

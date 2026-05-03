@@ -1,0 +1,130 @@
+#!/usr/bin/env bb
+;; nu_plugin_edn — Nushell plugin providing `from edn`.
+;;
+;; This is the working prototype from the design conversation. It handles
+;; the protocol handshake, basic scalars, maps, vectors, sets, and lists.
+;;
+;; Known limitations (see CLAUDE.md for the full list):
+;;   - Keywords lose round-trip fidelity: `:file` -> "file" (colon dropped).
+;;     A `--keep-keyword-prefix` flag is planned for opt-in fidelity.
+;;   - No `to edn` reverse direction yet
+;;   - No streaming input
+;;   - Errors don't carry source spans
+;;   - No tagged-literal support beyond what edn/read-string handles natively
+
+(require '[clojure.edn :as edn]
+         '[cheshire.core :as json])
+
+(defn log [& args]
+  (binding [*out* *err*]
+    (apply println "[nu_plugin_edn]" args) (flush)))
+
+;; Step 1: declare encoding to Nushell. Format: <byte-len><encoding-name>.
+;; "json" is 4 bytes, prefixed by the length byte 4.
+(let [out System/out]
+  (.write out (int 4))
+  (.write out (.getBytes "json" "UTF-8"))
+  (.flush out))
+
+(defn send-msg [m]
+  (println (json/generate-string m))
+  (flush))
+
+(defn read-msg []
+  (when-let [line (read-line)]
+    (json/parse-string line true)))
+
+;; Step 2: Hello exchange. We send first.
+(send-msg {:Hello {:protocol "nu-plugin"
+                   :version  "0.112.2"
+                   :features []}})
+(let [hello (read-msg)]
+  (log "got Hello:" (boolean hello)))
+
+;; Step 3: classify incoming control messages — they're not all maps.
+(defn classify [msg]
+  (cond
+    (nil? msg)                                 :eof
+    (= "Goodbye" msg)                          :goodbye
+    (and (map? msg) (contains? msg :Call))     :call
+    (and (map? msg) (contains? msg :Goodbye))  :goodbye
+    :else                                      :unknown))
+
+;; Convert a parsed Clojure value into Nushell's value-record shape.
+;; Each leaf carries a `span` (Nushell wants source-span info even for
+;; values that didn't come from source — `{:start 0 :end 0}` is fine).
+(defn ->nu-value [v]
+  (let [span {:start 0 :end 0}]
+    (cond
+      (nil? v)        {:Nothing {:span span}}
+      (string? v)     {:String  {:val v :span span}}
+      (boolean? v)    {:Bool    {:val v :span span}}
+      (integer? v)    {:Int     {:val v :span span}}
+      (float? v)      {:Float   {:val (double v) :span span}}
+      (keyword? v)    {:String  {:val (subs (str v) 1) :span span}}
+      (symbol? v)     {:String  {:val (str v) :span span}}
+      (map? v)        {:Record  {:val (into {} (for [[k vv] v]
+                                                  [(if (keyword? k) (subs (str k) 1) (str k))
+                                                   (->nu-value vv)]))
+                                 :span span}}
+      (sequential? v) {:List    {:vals (mapv ->nu-value v) :span span}}
+      (set? v)        {:List    {:vals (mapv ->nu-value v) :span span}}
+      :else           {:String  {:val (pr-str v) :span span}})))
+
+(defn handle-call [call-id call-data]
+  (cond
+    (= "Metadata" call-data)
+    (send-msg {:CallResponse [call-id {:Metadata {:version "0.1.0"}}]})
+
+    (= "Signature" call-data)
+    (send-msg
+      {:CallResponse
+       [call-id
+        {:Signature
+         [{:sig {:name "from edn"
+                 :description "Parse text as EDN."
+                 :extra_description "Converts EDN-formatted text into Nushell structured values."
+                 :search_terms ["edn" "clojure" "parse"]
+                 :required_positional []
+                 :optional_positional []
+                 :rest_positional nil
+                 :named [{:long "help" :short "h" :arg nil :required false
+                          :desc "Display help"
+                          :var_id nil :default_value nil}]
+                 :input_output_types [["String" "Any"]]
+                 :allow_variants_without_examples true
+                 :is_filter false :creates_scope false :allows_unknown_args false
+                 :category "Formats"}
+           :examples []}]}]})
+
+    (and (map? call-data) (contains? call-data :Run))
+    (let [run        (:Run call-data)
+          input-val  (get-in run [:input :Value 0])
+          input-str  (or (get-in input-val [:String :val]) "")]
+      (try
+        (let [parsed (edn/read-string input-str)]
+          (send-msg {:CallResponse
+                     [call-id
+                      {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
+        (catch Throwable t
+          (send-msg {:CallResponse
+                     [call-id
+                      {:Error {:msg (str "EDN parse error: " (.getMessage t))
+                               :labels [] :code nil :url nil :help nil :inner []}}]}))))
+
+    :else
+    (send-msg {:CallResponse
+               [call-id {:Error {:msg (str "unhandled call: " (pr-str call-data))
+                                 :labels [] :code nil :url nil :help nil :inner []}}]})))
+
+;; Main loop.
+(loop []
+  (let [msg  (read-msg)
+        kind (classify msg)]
+    (case kind
+      :eof      (log "EOF")
+      :goodbye  (log "Goodbye")
+      :call     (let [[call-id call-data] (:Call msg)]
+                  (handle-call call-id call-data)
+                  (recur))
+      :unknown  (do (log "unknown msg keys:" (when (map? msg) (keys msg))) (recur)))))
