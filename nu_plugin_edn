@@ -463,13 +463,19 @@
 (def to-edn-sig
   {:sig {:name "to edn"
          :description "Convert a Nushell value to EDN text."
-         :extra_description "Records become maps with keyword keys; lists/tables become vectors. Nushell-native types without an EDN equivalent (Duration, Filesize, Binary) fall back to primitives — see README for the full table."
+         :extra_description "Records become maps with keyword keys; lists/tables become vectors. Nushell-native types without an EDN equivalent (Duration, Filesize, Binary) fall back to primitives — see README for the full table. With --lines or --objects, each input element is emitted as its own top-level form."
          :search_terms ["edn" "clojure" "serialize" "emit"]
          :required_positional []
          :optional_positional []
          :rest_positional nil
-         :named [{:long "help" :short "h" :arg nil :required false
+         :named [{:long "help"    :short "h" :arg nil :required false
                   :desc "Display help"
+                  :var_id nil :default_value nil}
+                 {:long "lines"   :short "l" :arg nil :required false
+                  :desc "Emit each top-level form on its own line (newline-separated). Pairs with `from edn --lines` for streaming round-trips."
+                  :var_id nil :default_value nil}
+                 {:long "objects" :short "o" :arg nil :required false
+                  :desc "Emit each top-level form separated by single spaces, no newlines. Compact concatenated-objects output."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -530,38 +536,67 @@
         :else (recur acc)))))
 
 (defn handle-to-edn [call-id run]
+  ;; Three output modes, controlled by flags:
+  ;;   - default     : emit ONE form (input is wrapped as-is). Vector
+  ;;                   for a list/table; map for a record; etc.
+  ;;   - --lines     : emit each top-level item with a trailing newline.
+  ;;                   For a List/ListStream input, items are the elements.
+  ;;                   For a scalar/record input, the single value is one item.
+  ;;   - --objects   : same item iteration, single space separator instead
+  ;;                   of newline. EDN forms self-delimit, so the space is
+  ;;                   purely defensive — keeps the output streamable.
+  ;;
+  ;; --lines and --objects are NOT synonyms here (unlike on `from edn`,
+  ;; where parsing is whitespace-agnostic). Different separator semantics.
   (let [input  (:input run)
-        nu-val (cond
-                 (= "Empty" input) nil
+        named  (get-in run [:call :named])
+        lines? (flag-set? named "lines")
+        objs?  (flag-set? named "objects")
+        multi? (or lines? objs?)]
+    (try
+      (cond
+        (and (map? input) (contains? input :ByteStream))
+        (send-error-response
+         call-id
+         "to edn requires a structured value or list-stream input (got raw bytes)")
 
-                 (and (map? input) (contains? input :Value))
-                 (get-in input [:Value 0])
+        :else
+        (let [items (cond
+                      (= "Empty" input)
+                      []
 
-                 ;; A ListStream from upstream `where` / `each` / etc.
-                 ;; gets collected into a List Value before serializing.
-                 (and (map? input) (contains? input :ListStream))
-                 {:List {:vals (read-list-stream (get-in input [:ListStream :id]))
-                         :span {:start 0 :end 0}}}
+                      (and (map? input) (contains? input :Value))
+                      (let [v (get-in input [:Value 0])]
+                        (if (and multi? (contains? v :List))
+                          (get-in v [:List :vals])
+                          [v]))
 
-                 ;; ByteStream input doesn't make sense for `to edn` —
-                 ;; the user wants to serialize a structured value, not
-                 ;; pass raw bytes through.
-                 :else
-                 ::unsupported)]
-    (if (= nu-val ::unsupported)
-      (send-error-response
-       call-id
-       "to edn requires a structured value or list-stream input (got raw bytes)")
-      (try
-        (let [clj-val (when (some? nu-val) (nu->clj nu-val))
-              edn-str (pr-str clj-val)
-              span    {:start 0 :end 0}]
+                      (and (map? input) (contains? input :ListStream))
+                      (let [vals (read-list-stream (get-in input [:ListStream :id]))]
+                        (if multi?
+                          vals
+                          ;; Single-form mode: re-wrap as one List Value.
+                          [{:List {:vals vals :span {:start 0 :end 0}}}]))
+
+                      :else [])
+              edn-str (cond
+                        lines?
+                        (apply str (map #(str (pr-str (nu->clj %)) "\n") items))
+
+                        objs?
+                        (apply str (map #(str (pr-str (nu->clj %)) " ") items))
+
+                        :else
+                        ;; Single-form mode preserves the original behaviour:
+                        ;; Empty -> "nil", anything else -> pr-str of the value.
+                        (pr-str (when-let [v (first items)] (nu->clj v))))
+              span {:start 0 :end 0}]
           (send-msg {:CallResponse
                      [call-id
                       {:PipelineData
-                       {:Value [{:String {:val edn-str :span span}} nil]}}]}))
-        (catch Throwable t
-          (send-error-response call-id (str "EDN serialization error: " (.getMessage t))))))))
+                       {:Value [{:String {:val edn-str :span span}} nil]}}]})))
+      (catch Throwable t
+        (send-error-response call-id (str "EDN serialization error: " (.getMessage t)))))))
 
 (defn handle-call [call-id call-data]
   (cond

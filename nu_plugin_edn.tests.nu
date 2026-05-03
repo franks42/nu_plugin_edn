@@ -205,6 +205,74 @@ check "to edn: cljsh round-trip" (
     | get filename
 ) ["a.txt", "b.txt"]
 
+# --- to edn --lines / --objects ---
+# Same item-iteration semantics as `from edn --lines`, mirrored on output:
+# walk the input as a sequence of top-level forms, emit each with a
+# separator. `--lines` uses newlines (line-discipline output, plays with
+# head/tail/wc -l); `--objects` uses single spaces (compact concatenated
+# output, since EDN forms self-delimit). The two flags are NOT synonyms
+# on `to edn` — different separator semantics.
+
+# Default (no flag) preserves the existing behavior: emit ONE form.
+check "to edn: no flag wraps list as vector" (
+    [1 2 3] | to edn
+) "[1 2 3]"
+
+# --lines: newline-separated items
+check "to edn --lines: list elements as separate forms" (
+    [1 2 3] | to edn --lines
+) "1\n2\n3\n"
+
+check "to edn --lines: records" (
+    [{n: 1} {n: 2}] | to edn --lines
+) "{:n 1}\n{:n 2}\n"
+
+# --objects: space-separated items
+check "to edn --objects: list elements space-separated" (
+    [1 2 3] | to edn --objects
+) "1 2 3 "
+
+check "to edn --objects: records" (
+    [{n: 1} {n: 2}] | to edn --objects
+) "{:n 1} {:n 2} "
+
+# Empty list emits empty string in both multi-form modes
+check "to edn --lines: empty list" ([] | to edn --lines) ""
+check "to edn --objects: empty list" ([] | to edn --objects) ""
+
+# Scalar input produces one form (mirrors from edn --lines on a single
+# top-level form)
+check "to edn --lines: scalar" (42 | to edn --lines) "42\n"
+check "to edn --objects: scalar" (42 | to edn --objects) "42 "
+
+# ListStream input (`where`, `each`, etc.) is collected and iterated
+check "to edn --lines: ListStream from where" (
+    [{n: 1} {n: 2} {n: 3}] | where n > 1 | to edn --lines
+) "{:n 2}\n{:n 3}\n"
+
+# Round-trip through from edn (parser is whitespace-agnostic, so both
+# separators work)
+check "to edn --lines round-trips through from edn --lines" (
+    [{n: 1} {n: 2} {n: 3}] | to edn --lines | from edn --lines | length
+) 3
+
+check "to edn --objects round-trips through from edn --objects" (
+    [{n: 1} {n: 2}] | to edn --objects | from edn --objects | length
+) 2
+
+# Round-trip with a string literal as starting point — exercises the
+# `from edn --lines | to edn --lines | from edn --lines` chain without
+# triggering the incremental-input path of the leading from-edn (which
+# would interact badly with the chained plugin Calls; see CLAUDE.md
+# §"Known limitation: chained plugin calls + incremental input").
+check "to edn --lines: chained-plugin round-trip preserves N forms" (
+    "{:i 0}\n{:i 1}\n{:i 2}\n"
+    | from edn --lines
+    | to edn --lines
+    | from edn --lines
+    | get i | math sum
+) 3
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

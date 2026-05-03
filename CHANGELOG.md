@@ -8,9 +8,19 @@ once a 1.0 ships.
 
 ## [Unreleased] — `0.112.2-SNAPSHOT`
 
-Active dev window after v0.112.2. The next release will be either `0.112.2-1` (if plugin-only fixes ship before the next Nushell minor) or `v<next-Nushell-version>` (if Nushell ships first). Drop the `-SNAPSHOT` suffix on `plugin-release` and run `bb release-check` before tagging.
+### Added
+- **`to edn --lines` / `to edn --objects`** — multi-form output. Mirrors `from edn --lines` / `from edn --objects` on the input side, but with a key asymmetry: the two flags are **synonyms** on `from edn` (parsing is whitespace-agnostic) but have **different separator semantics** on `to edn`:
+  - `--lines` (`-l`) emits each item with a trailing newline (`<form>\n`). Line-discipline output that plays with `head`, `tail`, `wc -l`, line-buffered consumers.
+  - `--objects` (`-o`) emits each item with a trailing single space (`<form> `). Compact concatenated-objects output, since EDN forms self-delimit and the parser doesn't care about whitespace shape.
+  - For a list/table input, items are the elements. For a scalar/record input, the single value is treated as one item. Empty list → empty string.
+  - `from edn --objects | to edn --lines` is the natural normalizer: turn any-whitespace EDN streams into NDJSON-style line-separated EDN. Caveat: chained plugin commands hit a known limitation (see CHANGELOG below + CLAUDE.md).
+- 13 new integration tests covering both flags across scalar/list/record/empty inputs, plus round-trips through `from edn --lines/--objects`. Suite is now 60 cases.
 
-Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. Plus source spans on `from edn` parse errors. See CLAUDE.md §2 and §4.
+### Documented limitation
+- **Chained plugin calls in the same pipeline + incremental input from a ByteStream**: when `from edn --lines` is using its incremental path AND a downstream plugin command (`to edn --lines`, another `from edn`, etc.) appears in the same pipeline, the pipeline can stall. Nushell pipelines plugin Calls concurrently, but our plugin processes Calls serially — the second Call arrives while the first is still in incremental refill and gets dropped by the demuxer. Workaround: insert `| collect` between the streaming `from edn` and the next plugin command. See CLAUDE.md "Known limitation" for the architectural fix path.
+
+### Planned for `to edn` (still pending)
+- `--pretty`, `--meta`, `--keep-keyword-prefix`, `--string-keys`, `--canonical` (cedn integration). Plus source spans on `from edn` parse errors. See CLAUDE.md §2 and §4.
 
 ## [0.112.2] — 2026-05-03 — Nushell-aligned versioning + CI
 

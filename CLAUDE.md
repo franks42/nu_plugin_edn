@@ -131,6 +131,21 @@ Planned flags (not yet implemented):
 - `--lines` — emit each list element as its own top-level form rather than wrapping in a vector. Mirror of `from edn --lines`.
 - `--canonical` (`-c`) — **exploration**. Emit byte-stable canonical EDN suitable for hashing / signing / content-addressing structured pipeline output. Use case: `data | to edn --canonical | sha256sum` (content hash), `data | to edn --canonical | bb sign.clj | bb verify.clj` (signature flow), Merkle trees over structured data, etc. Implementation candidate: [canonical-edn (cedn)](https://github.com/franks42/cedn) — same author, bb-compatible (74 tests passing on bb), zero production deps beyond Clojure, designed exactly for this. Open questions before shipping: (1) does adding cedn as a dep complicate the "no `:deps` needed" pitch? cedn is a single .cljc file; could possibly vendor it inline rather than declare. (2) interaction with `--pretty` (mutually exclusive — canonical has fixed whitespace). (3) interaction with `--meta` (canonical EDN spec doesn't include `^{...}` syntax — flag combo would need to error). (4) Nushell-native type fallbacks already produce canonical-stable primitives (ms ints, bytes ints, base64 strings) — round-trip stability there should be good. Worth a design spike before implementation.
 
+### Known limitation: chained plugin calls + incremental input
+
+When `from edn --lines` is consuming a `ByteStream` via the incremental path AND another plugin Call appears later in the same pipeline (e.g. `bb ... | from edn --lines | to edn --lines | ...`), Nushell pipelines the two Calls — sending Call(to edn) while we're still in `from edn`'s refill loop. Our refill demuxer doesn't have a path for incoming Call messages and drops them on the floor; the second plugin command then never gets a response, and the pipeline stalls.
+
+The plugin is single-threaded and processes Run calls serially. Nushell expects pipelined plugin commands to be handled concurrently (overlap A's output streaming with B's input consumption, all in the same plugin process). Closing this gap requires either:
+- Worker threads per Call (with a synchronized writer for `send-msg` to avoid interleaved JSON output).
+- Cooperative scheduling — when one Call's handler is blocked waiting for input data, dispatch a queued Call instead.
+
+Workarounds for users hitting this:
+- Insert `| collect` between the streaming `from edn` and the next plugin command. Materializes the stream into a Value, dropping the incremental fast path but unblocking pipelining.
+- Buffer the input first: `let edn = (bb ... | collect); $edn | from edn --lines | to edn --lines | ...`.
+- For the common case of just one plugin command at the end of a pipeline (the producer is `bb ...`, the consumer is built-in like `where`/`first`/`length`), the incremental path works as expected — single plugin Call, no chaining.
+
+This is on the roadmap. The incremental path is correct as a single-call optimization; it's the multi-call composition that's broken. Tests exist for both ends and the failure mode is well-understood; the fix is a real architectural change rather than a quick patch.
+
 ### 3. Streaming input
 
 Both directions are now incremental:
