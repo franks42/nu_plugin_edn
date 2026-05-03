@@ -16,6 +16,9 @@ once a 1.0 ships.
 ### Changed
 - Anchored Nushell version moved from 0.110.0 to 0.112.2 after verifying no wire-protocol changes in the intervening releases. All tests pass on 0.112.2.
 
+### Added
+- **Multi-form input mode** via `--lines` (`-l`) or `--objects` (`-o`) flags. With either flag, `from edn` parses the input as a sequence of top-level EDN forms and emits each as a separate value through a `ListStream`. Form boundaries are determined by the EDN reader itself (matched brackets, quoted strings, comments stripped) — not by newlines — so multi-line forms and comments work transparently. Downstream commands like `first 10` see a real stream and can short-circuit. The two flag names are aliases (`--lines` mirrors NDJSON conventions, `--objects` mirrors `from json --objects`).
+
 ### Fixed
 - EDN keywords now drop the leading colon when stringified (`:file` → `"file"`), with namespaces preserved (`:foo/bar` → `"foo/bar"`). Previously the colon survived, breaking idiomatic Nushell filters like `where type == "file"`.
 - **ByteStream input**: `bb produce.clj | from edn` now works directly — the plugin handles `ByteStream` pipeline input by consuming `Data` messages until `End`, acknowledging each chunk for backpressure. Previously a `| collect` workaround was required because the plugin only handled the `Value` input variant.

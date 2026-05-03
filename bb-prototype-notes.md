@@ -77,6 +77,37 @@ Bonus side effect: once `from edn` is registered, `open file.edn`
 auto-parses via the registered command — users get table output without
 having to write `from edn`.
 
+## ListStream output
+
+To stream multiple values back to Nushell (rather than returning one
+`Value`), respond with a `ListStream` header carrying a stream id, then
+push each value as a `Data` message, then `End`:
+
+```
+{:CallResponse [<call-id> {:PipelineData
+                           {:ListStream {:id <sid> :span ... :metadata nil}}}]}
+{:Data [<sid> {:List <nu-value>}]}    ; 0..N times
+{:End <sid>}
+```
+
+The stream id space is plugin-local — direction disambiguates the
+channel, so the plugin doesn't have to avoid engine-allocated ids.
+A simple `(atom 0)` counter works.
+
+After `End`, the engine sends `Ack` messages (one per `Data` it
+processed) and possibly a `Drop` if a downstream command short-
+circuited (e.g. `| first 10`). With single-threaded blocking reads
+those messages arrive only after we return to the main loop — which
+means we've already emitted everything. They're harmless to ignore,
+but treating them as "expected stream control" rather than `:unknown`
+keeps logs clean.
+
+True early-termination on the input side (stop reading the byte stream
+when `Drop` arrives mid-emit) requires interleaving stdin reads with
+output writes — that's non-trivial because both inbound Data and
+inbound Drop come over the same stdin channel, and the bb default is
+blocking line reads. Deferred.
+
 ## Calls Nushell makes that aren't `Run`
 
 The first `Call` after Hello is **NOT** a Run. The sequence is:

@@ -66,6 +66,10 @@ bb my-producer.clj | from edn | where status == "active" | length
 
 # `open` of a .edn file auto-parses via the registered command
 open config.edn | get :database
+
+# Multi-form input: parse a sequence of top-level EDN forms.
+# Each `(prn ...)` in the producer becomes one row; `first N` short-circuits.
+bb -e '(doseq [event (events)] (prn event))' | from edn --lines | first 10
 ```
 
 ## Known limitations

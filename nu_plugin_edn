@@ -47,12 +47,17 @@
   (log "got Hello:" (boolean hello)))
 
 ;; Step 3: classify incoming control messages — they're not all maps.
+;; Ack and Drop messages from the engine arrive after we've finished
+;; emitting a ListStream (they reference our output stream id). Treat
+;; them as expected-but-ignored rather than :unknown.
 (defn classify [msg]
   (cond
     (nil? msg)                                 :eof
     (= "Goodbye" msg)                          :goodbye
     (and (map? msg) (contains? msg :Call))     :call
     (and (map? msg) (contains? msg :Goodbye))  :goodbye
+    (and (map? msg) (contains? msg :Ack))      :stream-ctl
+    (and (map? msg) (contains? msg :Drop))     :stream-ctl
     :else                                      :unknown))
 
 ;; Convert a parsed Clojure value into Nushell's value-record shape.
@@ -112,6 +117,61 @@
           ;; Any other interleaved message (e.g. Drop) — keep reading.
           :else (recur))))))
 
+;; ListStream output handling (--lines / --objects mode).
+;;
+;; In multi-form mode we don't return a single Value; we open a ListStream
+;; and push parsed forms as Data messages. This lets downstream commands
+;; like `first 10` short-circuit instead of waiting for the whole input
+;; to be parsed and assembled into a List.
+;;
+;; Stream ids must be unique within the plugin process. We allocate from
+;; an atom that starts at zero — the plugin's id space is independent
+;; from the engine's, since direction disambiguates the channel.
+(def next-stream-id (atom 0))
+(defn alloc-stream-id [] (swap! next-stream-id inc))
+
+;; Read zero or more top-level EDN forms from a string. We deliberately
+;; use form boundaries (matching brackets, quoted strings, etc.) rather
+;; than newlines: EDN forms are self-delimiting, multi-line forms parse
+;; correctly, and `; comments` work because edn/read strips them. The
+;; tradeoff is that one giant top-level form forces the whole stream
+;; into memory — but well-behaved producers emit small forms.
+(defn read-all-forms [s]
+  (let [reader (java.io.PushbackReader. (java.io.StringReader. s))
+        eof    (Object.)]
+    (loop [acc []]
+      (let [v (edn/read {:eof eof} reader)]
+        (if (= v eof)
+          acc
+          (recur (conj acc v)))))))
+
+;; Detect a switch by name in the call's :named entries. Each entry is
+;; a [{:item "name" :span ...} value] pair; we only care about presence.
+(defn flag-set? [named flag-name]
+  (some (fn [[k _v]] (= (:item k) flag-name)) named))
+
+;; Emit a sequence of values as a ListStream response. Each value goes
+;; out as {:Data [id {:List <nu-value>}]}, terminated by {:End id}.
+;;
+;; v1 limitation: we don't wait on engine Acks before sending the next
+;; Data, and we don't react to Drop messages mid-stream. For moderate
+;; streams the engine tolerates this; large streams may eventually need
+;; backpressure. If the engine sends Drop after enough downstream
+;; consumption (e.g. `| first 10`), the message will be processed in
+;; the main loop after End — harmless but means we still computed and
+;; sent every value. True early-termination requires interleaving stdin
+;; reads with output writes, which is deferred.
+(defn emit-list-stream [call-id forms]
+  (let [sid  (alloc-stream-id)
+        span {:start 0 :end 0}]
+    (send-msg {:CallResponse
+               [call-id
+                {:PipelineData
+                 {:ListStream {:id sid :span span :metadata nil}}}]})
+    (doseq [v forms]
+      (send-msg {:Data [sid {:List (->nu-value v)}]}))
+    (send-msg {:End sid})))
+
 ;; Pull the EDN text out of whatever pipeline shape Nushell handed us.
 ;; Three shapes show up in practice:
 ;;   - "Empty"               — no upstream input; treat as empty string
@@ -151,8 +211,14 @@
                  :required_positional []
                  :optional_positional []
                  :rest_positional nil
-                 :named [{:long "help" :short "h" :arg nil :required false
+                 :named [{:long "help"    :short "h" :arg nil :required false
                           :desc "Display help"
+                          :var_id nil :default_value nil}
+                         {:long "lines"   :short "l" :arg nil :required false
+                          :desc "Parse the input as a sequence of top-level EDN forms; emit each as a separate value (ListStream output)."
+                          :var_id nil :default_value nil}
+                         {:long "objects" :short "o" :arg nil :required false
+                          :desc "Alias for --lines (mirrors `from json --objects` naming)."
                           :var_id nil :default_value nil}]
                  :input_output_types [["String" "Any"]]
                  :allow_variants_without_examples true
@@ -163,12 +229,17 @@
     (and (map? call-data) (contains? call-data :Run))
     (let [run        (:Run call-data)
           input      (:input run)
+          named      (get-in run [:call :named])
+          multi?     (or (flag-set? named "lines")
+                         (flag-set? named "objects"))
           input-str  (extract-input input)]
       (try
-        (let [parsed (edn/read-string input-str)]
-          (send-msg {:CallResponse
-                     [call-id
-                      {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
+        (if multi?
+          (emit-list-stream call-id (read-all-forms input-str))
+          (let [parsed (edn/read-string input-str)]
+            (send-msg {:CallResponse
+                       [call-id
+                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]})))
         (catch Throwable t
           (send-msg {:CallResponse
                      [call-id
@@ -185,9 +256,10 @@
   (let [msg  (read-msg)
         kind (classify msg)]
     (case kind
-      :eof      (log "EOF")
-      :goodbye  (log "Goodbye")
-      :call     (let [[call-id call-data] (:Call msg)]
-                  (handle-call call-id call-data)
-                  (recur))
-      :unknown  (do (log "unknown msg keys:" (when (map? msg) (keys msg))) (recur)))))
+      :eof        (log "EOF")
+      :goodbye    (log "Goodbye")
+      :call       (let [[call-id call-data] (:Call msg)]
+                    (handle-call call-id call-data)
+                    (recur))
+      :stream-ctl (recur)
+      :unknown    (do (log "unknown msg keys:" (when (map? msg) (keys msg))) (recur)))))

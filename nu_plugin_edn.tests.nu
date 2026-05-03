@@ -92,6 +92,49 @@ check "byte stream via open of .txt" (
 ) "file"
 rm /tmp/nu_plugin_edn_test.txt
 
+# --- Multi-form mode (--lines / --objects) ---
+# Streams each top-level EDN form as a separate value via ListStream
+# output. Form boundaries are determined by the EDN reader (matched
+# brackets, quoted strings, comments stripped) — not by newlines.
+
+check "lines: count of 3 scalar forms" (
+    "42 43 44" | from edn --lines | length
+) 3
+
+check "lines: mixed shapes" (
+    "[1 2] {:a 1} :kw" | from edn --lines | length
+) 3
+
+check "objects: alias for --lines" (
+    "[1 2] {:a 1}" | from edn --objects | length
+) 2
+
+# Multi-line vector spans several lines — still ONE form. Then a second
+# form follows. Total: 2.
+check "lines: multi-line forms parse as one each" (
+    "[1\n 2\n 3]\n{:a 1}" | from edn --lines | length
+) 2
+
+# Comments between forms are stripped by the EDN reader.
+check "lines: comments are stripped" (
+    "; header\n[1 2 3]\n; footer" | from edn --lines | length
+) 1
+
+# Streaming through bb output (the cljsh use case for streaming producers).
+check "lines: streamed bb output" (
+    bb -e '(doseq [i (range 5)] (prn {:i i :tag :bb}))' | from edn --lines | length
+) 5
+
+check "lines: bb output values are records" (
+    bb -e '(doseq [i (range 3)] (prn {:i i}))' | from edn --lines | get i | math sum
+) 3
+
+# Early-termination via `first` — `from edn --lines` emits a ListStream
+# so downstream commands can short-circuit.
+check "lines: first N short-circuits" (
+    bb -e '(doseq [i (range 100)] (prn {:i i}))' | from edn --lines | first 3 | length
+) 3
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

@@ -113,9 +113,7 @@ Implementation hints:
 
 ByteStream input from piped external commands is handled (the plugin consumes `Data` messages until `End`, ack-ing each chunk for backpressure), but the bytes are buffered into a single string before parsing — so memory grows with input size. For typical configs this is fine; for log-sized inputs it isn't.
 
-Two further improvements would help:
-- **EDN-per-line mode**: each line is one EDN value. Compatible with `tools.deps`-style logs and bb script output. Add `from edn --lines` for this mode and emit values as they're parsed.
-- **True incremental parsing of a single document**: harder, because EDN's reader doesn't expose a streaming API in bb. Defer until a real user hits a memory wall.
+Multi-form mode (`--lines` / `--objects`) parses top-level forms and emits them as a `ListStream`, so downstream commands can short-circuit. The remaining gap is **input-side streaming**: today we still read the entire byte stream before parsing, so a 1M-record input is fully read even when `| first 5` is downstream. Closing this requires interleaving stdin reads with output writes — non-trivial because both Data (input bytes) and Drop (engine cancelling our output) arrive on stdin and the plugin currently does blocking line reads. Defer until a real user hits a memory wall.
 
 ### 4. Better error reporting
 
