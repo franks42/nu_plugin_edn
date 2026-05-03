@@ -6,9 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once a 1.0 ships.
 
-## [Unreleased]
+## [Unreleased] — `0.112.2-SNAPSHOT`
 
-(Active dev cycle — see `plugin-release` in the source for the SNAPSHOT identity. Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. See CLAUDE.md §2.)
+Active dev window after v0.112.2. The next release will be either `0.112.2-1` (if plugin-only fixes ship before the next Nushell minor) or `v<next-Nushell-version>` (if Nushell ships first). Drop the `-SNAPSHOT` suffix on `plugin-release` and run `bb release-check` before tagging.
+
+Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. Plus source spans on `from edn` parse errors. See CLAUDE.md §2 and §4.
 
 ## [0.112.2] — 2026-05-03 — Nushell-aligned versioning + CI
 

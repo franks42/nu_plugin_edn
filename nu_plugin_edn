@@ -63,7 +63,7 @@
 (def nushell-target
   (or (System/getenv "NU_PLUGIN_EDN_NU_VERSION") "0.112.2"))
 
-(def plugin-release "0.112.2")
+(def plugin-release "0.112.2-SNAPSHOT")
 
 ;; Step 2: Hello exchange. We send first.
 (send-msg {:Hello {:protocol "nu-plugin"
