@@ -260,13 +260,23 @@ check "to edn --objects round-trips through from edn --objects" (
     [{n: 1} {n: 2}] | to edn --objects | from edn --objects | length
 ) 2
 
-# Round-trip with a string literal as starting point — exercises the
-# `from edn --lines | to edn --lines | from edn --lines` chain without
-# triggering the incremental-input path of the leading from-edn (which
-# would interact badly with the chained plugin Calls; see CLAUDE.md
-# §"Known limitation: chained plugin calls + incremental input").
+# Chained-plugin round-trip via a string literal (no incremental path).
 check "to edn --lines: chained-plugin round-trip preserves N forms" (
     "{:i 0}\n{:i 1}\n{:i 2}\n"
+    | from edn --lines
+    | to edn --lines
+    | from edn --lines
+    | get i | math sum
+) 3
+
+# Streaming round-trip: bb produces (ByteStream → incremental from-edn),
+# pipeline chains through to-edn and a second from-edn. This exercises
+# concurrent plugin Calls — the engine sends Call(to edn) while
+# from-edn is still in incremental refill. Stream readers queue the
+# Call so the main loop dispatches it after from-edn finishes. End-to-
+# end cljsh streaming story.
+check "to edn --lines: bb-streamed round-trip via chained plugin Calls" (
+    bb -e '(doseq [i (range 3)] (prn {:i i :tag :stream}))'
     | from edn --lines
     | to edn --lines
     | from edn --lines

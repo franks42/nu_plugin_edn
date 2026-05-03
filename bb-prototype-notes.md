@@ -151,6 +151,40 @@ output writes — that's non-trivial because both inbound Data and
 inbound Drop come over the same stdin channel, and the bb default is
 blocking line reads. Deferred.
 
+## Concurrent plugin Calls in the same pipeline
+
+When a Nushell pipeline chains multiple plugin commands from the
+same plugin (`from edn --lines | to edn --lines | from edn --lines`),
+the engine pipelines them: Calls B and C arrive on stdin while we're
+still processing Call A. So do `:Data` messages for B's and C's input
+streams (because A's output stream is B's input stream, looped back
+through the engine).
+
+The single-threaded plugin handles this by **routing** messages, not
+by running Calls concurrently:
+
+- `pending-calls` (atom-vec) — `:Call` messages captured while we're
+  inside another reader. The main loop drains this queue before
+  reading more from stdin.
+- `stream-buffers` (atom-map of stream-id → vec) — `:Data`/`:End`
+  messages for streams the current reader isn't consuming. Future
+  readers for those streams find them there first.
+
+The unified routing lives in `pull-stream-msg`, used by every reader
+(`read-byte-stream`, `read-list-stream`, `refill-stream-input!`).
+Each reader passes its own stream-id; pull-stream-msg returns the
+next message for that id (pulling from the buffer if available;
+otherwise reading stdin and demuxing whatever arrives). `:Call`,
+foreign `:Data`/`:End`, and output `:Drop` are all handled along
+the way without losing messages.
+
+The bug this fixed: in script-mode `nu` (where Nushell pipelines all
+stages aggressively), the chained `from edn --lines | to edn --lines |
+from edn --lines` would produce empty output for the middle stage
+because B's input `:Data` arrived during Call A's incremental refill
+and got discarded by the `(recur)` on a foreign stream id. The fix
+is to buffer instead of discard.
+
 ## Calls Nushell makes that aren't `Run`
 
 The first `Call` after Hello is **NOT** a Run. The sequence is:

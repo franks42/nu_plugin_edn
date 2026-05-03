@@ -175,28 +175,107 @@
 ;; edn/read-string. This is a buffered approach — the entire stream
 ;; lands in memory before parsing — appropriate for typical config-
 ;; sized inputs but not for log-sized ones.
+;; ----------------------------------------------------------------
+;; Concurrent-Call routing (single-threaded).
+;;
+;; Nushell pipelines plugin Calls concurrently. In `bb ... | from edn
+;; --lines | to edn --lines | from edn --lines`, three plugin Calls
+;; are in flight at once and the engine routes data between them via
+;; the same stdin/stdout channel. While we're processing Call A,
+;; messages destined for Calls B and C arrive on stdin:
+;;
+;;   - :Call(B) — the next plugin command to run.
+;;   - :Data/:End for B's input stream — values that Call A produced
+;;     for its output stream, looped back as B's input.
+;;
+;; Our plugin runs Calls serially (one at a time), so messages for
+;; not-yet-running Calls have to be buffered, not discarded. Two
+;; buffers handle this:
+;;
+;;   pending-calls   — vec of :Call messages waiting to be dispatched.
+;;                     Drained by the main loop before it reads stdin.
+;;   stream-buffers  — map of stream-id -> vec of :Data/:End messages
+;;                     for streams not yet being read. Drained by
+;;                     pull-stream-msg when the relevant Call eventually
+;;                     reads from that stream.
+;;
+;; Without the second buffer, Call B's input data gets lost because
+;; Call A's stream readers see :Data with a foreign stream id and
+;; recur past it on the way to A's own input.
+(def pending-calls (atom []))
+(defn queue-call! [msg] (swap! pending-calls conj msg))
+
+(def stream-buffers (atom {}))
+
+(defn- buffer-stream-msg! [msg]
+  (when-let [id (cond
+                  (contains? msg :Data) (first (:Data msg))
+                  (contains? msg :End)  (:End msg))]
+    (swap! stream-buffers update id (fnil conj []) msg)))
+
+(defn- pop-buffered-stream-msg! [stream-id]
+  (when-let [buf (get @stream-buffers stream-id)]
+    (when (seq buf)
+      (swap! stream-buffers update stream-id #(vec (rest %)))
+      (first buf))))
+
+(defn pull-stream-msg
+  "Get the next :Data or :End message for stream-id. Pulls from the
+   per-stream buffer first; otherwise reads stdin, routing other
+   messages along the way (foreign stream traffic -> stream-buffers,
+   :Call -> pending-calls, :Drop on out-sid -> out-state, :Ack/other
+   silently discarded). Returns nil on EOF.
+
+   `out-state` is an atom for emit-stream-incremental's drop tracking;
+   pass nil from readers that don't have an output stream open."
+  [stream-id out-state]
+  (or (pop-buffered-stream-msg! stream-id)
+      (loop []
+        (let [msg (read-msg)]
+          (cond
+            (nil? msg) nil
+
+            (and (map? msg) (contains? msg :Data))
+            (let [[id _] (:Data msg)]
+              (if (= id stream-id)
+                msg
+                (do (buffer-stream-msg! msg) (recur))))
+
+            (and (map? msg) (contains? msg :End))
+            (if (= (:End msg) stream-id)
+              msg
+              (do (buffer-stream-msg! msg) (recur)))
+
+            (and (map? msg) (contains? msg :Call))
+            (do (queue-call! msg) (recur))
+
+            (and (map? msg) (contains? msg :Drop))
+            (do (when (and out-state
+                           (= (:Drop msg) (:out-sid @out-state)))
+                  (swap! out-state assoc :dropped? true))
+                (recur))
+
+            (and (map? msg) (contains? msg :Ack))
+            (recur)
+
+            :else
+            (do (log "pull-stream-msg ignoring:"
+                     (when (map? msg) (keys msg)))
+                (recur)))))))
+
 (defn read-byte-stream [stream-id]
   (let [baos (java.io.ByteArrayOutputStream.)]
     (loop []
-      (let [msg (read-msg)]
+      (let [msg (pull-stream-msg stream-id nil)]
         (cond
-          (nil? msg)
-          (.toString baos "UTF-8")
-
-          (and (map? msg) (contains? msg :End))
-          (.toString baos "UTF-8")
-
-          (and (map? msg) (contains? msg :Data))
-          (let [[id data] (:Data msg)]
-            (when (= id stream-id)
-              (when-let [bs (get-in data [:Raw :Ok])]
-                (doseq [b bs]
-                  (.write baos (int b))))
-              (send-msg {:Ack stream-id}))
-            (recur))
-
-          ;; Any other interleaved message (e.g. Drop) — keep reading.
-          :else (recur))))))
+          (nil? msg)                  (.toString baos "UTF-8")
+          (contains? msg :End)        (.toString baos "UTF-8")
+          (contains? msg :Data)
+          (let [[_ data] (:Data msg)]
+            (when-let [bs (get-in data [:Raw :Ok])]
+              (doseq [b bs] (.write baos (int b))))
+            (send-msg {:Ack stream-id})
+            (recur)))))))
 
 ;; ListStream output handling (--lines / --objects mode).
 ;;
@@ -288,40 +367,17 @@
     (byte-array (mapv unchecked-byte bs))))
 
 (defn- refill-stream-input! [current eof? in-sid out-state]
-  ;; Read protocol messages until we get input bytes or input EOF for
-  ;; in-sid. Output-side messages (Drop/Ack on out-sid) update out-state
-  ;; and we keep reading. Other messages are logged and skipped.
-  (loop []
-    (let [msg (read-msg)]
-      (cond
-        (nil? msg)
-        (reset! eof? true)
-
-        (and (map? msg) (contains? msg :Data))
-        (let [[id data] (:Data msg)]
-          (if (= id in-sid)
-            (do (reset! current
-                        (java.io.ByteArrayInputStream. (bytes-from-data data)))
-                (send-msg {:Ack in-sid}))
-            (recur)))
-
-        (and (map? msg) (contains? msg :End))
-        (if (= (:End msg) in-sid)
-          (reset! eof? true)
-          (recur))
-
-        (and (map? msg) (contains? msg :Drop))
-        (do (when (= (:Drop msg) (:out-sid @out-state))
-              (swap! out-state assoc :dropped? true))
-            (recur))
-
-        (and (map? msg) (contains? msg :Ack))
-        (recur)
-
-        :else
-        (do (log "incremental refill ignoring:"
-                 (when (map? msg) (keys msg)))
-            (recur))))))
+  ;; Pull one message for our input stream. pull-stream-msg routes
+  ;; foreign stream traffic, Calls, and output Drop along the way.
+  (let [msg (pull-stream-msg in-sid out-state)]
+    (cond
+      (nil? msg)           (reset! eof? true)
+      (contains? msg :End) (reset! eof? true)
+      (contains? msg :Data)
+      (let [[_ data] (:Data msg)]
+        (reset! current
+                (java.io.ByteArrayInputStream. (bytes-from-data data)))
+        (send-msg {:Ack in-sid})))))
 
 (defn- make-incremental-input-stream [in-sid out-state]
   ;; bb's `proxy` doesn't fall through to JDK default impls — every
@@ -518,22 +574,14 @@
 ;; commands emit ListStreams, not in-memory Values.
 (defn read-list-stream [stream-id]
   (loop [acc []]
-    (let [msg (read-msg)]
+    (let [msg (pull-stream-msg stream-id nil)]
       (cond
-        (nil? msg)
-        acc
-
-        (and (map? msg) (contains? msg :End))
-        acc
-
-        (and (map? msg) (contains? msg :Data))
-        (let [[id data] (:Data msg)]
-          (if (= id stream-id)
-            (do (send-msg {:Ack stream-id})
-                (recur (conj acc (:List data))))
-            (recur acc)))
-
-        :else (recur acc)))))
+        (nil? msg)           acc
+        (contains? msg :End) acc
+        (contains? msg :Data)
+        (let [[_ data] (:Data msg)]
+          (send-msg {:Ack stream-id})
+          (recur (conj acc (:List data))))))))
 
 (defn handle-to-edn [call-id run]
   ;; Three output modes, controlled by flags:
@@ -618,15 +666,27 @@
     :else
     (send-error-response call-id (str "unhandled call: " (pr-str call-data)))))
 
-;; Main loop.
+;; Main loop. Drains any Calls that the stream readers captured during
+;; concurrent pipelining BEFORE pulling new messages off stdin — this
+;; ensures pipelined Call(B) issued by the engine while we were
+;; processing Call(A) eventually gets handled.
+(defn- drain-pending-call! []
+  (when-let [msg (first @pending-calls)]
+    (swap! pending-calls (fn [v] (vec (rest v))))
+    (let [[call-id call-data] (:Call msg)]
+      (handle-call call-id call-data))
+    true))
+
 (loop []
-  (let [msg  (read-msg)
-        kind (classify msg)]
-    (case kind
-      :eof        (log "EOF")
-      :goodbye    (log "Goodbye")
-      :call       (let [[call-id call-data] (:Call msg)]
-                    (handle-call call-id call-data)
-                    (recur))
-      :stream-ctl (recur)
-      :unknown    (do (log "unknown msg keys:" (when (map? msg) (keys msg))) (recur)))))
+  (if (drain-pending-call!)
+    (recur)
+    (let [msg  (read-msg)
+          kind (classify msg)]
+      (case kind
+        :eof        (log "EOF")
+        :goodbye    (log "Goodbye")
+        :call       (let [[call-id call-data] (:Call msg)]
+                      (handle-call call-id call-data)
+                      (recur))
+        :stream-ctl (recur)
+        :unknown    (do (log "unknown msg keys:" (when (map? msg) (keys msg))) (recur))))))
