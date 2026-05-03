@@ -272,6 +272,41 @@ Three workflows in `.github/workflows/`:
 - ⏳ The plugin is in the awesome-nu registry. (Submission needs a `language: clojure` PR to their `config.yaml` schema first — none of the existing accepted languages applies.)
 - ⏳ Issue #6415 gets a "fixed by external plugin" reference. (To be commented once awesome-nu submission lands.)
 
+## Ecosystem ideas — potential follow-on plugins
+
+The plugin's protocol scaffolding (Hello/Metadata/Signature/Run dispatch, `pull-stream-msg` routing, two-version-constant scheme, `bb.edn` task layout, three-workflow CI matrix) is reusable. Once you've written one Clojure-shaped Nushell plugin, the next one is mostly filling in command-specific logic. Concrete candidates:
+
+### `nu_plugin_uuidv7`
+
+Sibling to `nu_plugin_ulid` ([github.com/lizclipse/nu_plugin_ulid](https://github.com/lizclipse/nu_plugin_ulid)) but emitting **UUIDv7** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)) instead of ULID — same time-ordered sortable-ID niche, different format. UUIDv7 fits into existing UUID tooling (databases, libraries) where ULID requires custom support.
+
+Suggested commands:
+- `random uuid7` — generate a fresh UUIDv7. Mirrors `random ulid` and `random uuid`.
+- `parse uuid7` — extract `{timestamp: datetime, counter: ...}` record. Mirrors `parse ulid`.
+- `into uuid7` — synthesize a UUIDv7 from a given timestamp (analogous to `random ulid --zeroed` for deterministic-suffix generation).
+
+Reference implementation: [uuidv7.cljc](../uuidv7.cljc) (FrankS, same author). Cross-platform Clojure library, ~50–100 LOC for the core algorithm. RFC 9562 Method 3 (monotonic random counter).
+
+### `nu_plugin_cedn` (or `to edn --canonical` inside this plugin)
+
+Canonical EDN — byte-stable, JCS-cross-validated EDN serialization for cryptographic signing/hashing/content-addressing. Reference: [canonical-edn (cedn)](https://github.com/franks42/cedn). Currently parked as a planned `--canonical` flag inside `nu_plugin_edn` (see §2 roadmap), but a separate plugin focused on `hash`, `sign`, `verify` over canonical-EDN output is also conceivable.
+
+### Distribution caveat: external JAR deps complicate the single-file ship
+
+The current `nu_plugin_edn` distribution model is "one executable bb script, no `:deps`, only bb-bundled libraries (`clojure.edn`, `cheshire`)." That model breaks if a plugin depends on external Clojure libraries (e.g. `com.github.franks42/uuidv7` from Maven), because:
+
+- A user grabbing the script alone can't run it — they'd need network/Maven access at first run.
+- bb's `:deps` resolution happens at script start, adding latency.
+- Distribution becomes "script + `bb.edn` + cache" rather than "one file."
+
+Three ways to keep the single-file model when a plugin wants library functionality:
+
+1. **Vendor inline.** Copy the relevant algorithm into the plugin script. For uuidv7.cljc the core is ~50 LOC; for cedn the published `dist/cedn.cljc` is single-file by design. Cost: manual sync when upstream changes (low for stable libraries with low churn). Same author = no licensing friction for FrankS-published libs.
+2. **`add-deps` at startup.** bb supports `(babashka.deps/add-deps {:deps {...}})` — resolves at first run, caches afterward. Single-file ship preserved, but adds cold-start latency (~hundreds of ms for resolution) and requires network on first run.
+3. **Re-derive directly.** For UUIDv7, the algorithm is small enough to implement using bb's stdlib (`java.util.UUID/randomUUID` + bit-twiddling per RFC 9562). No external dep needed, no upstream sync burden, but maintenance falls on the plugin author rather than tracking upstream's bug fixes.
+
+For follow-on plugins, **vendoring is probably the right default** — keeps the single-file pitch intact, and FrankS-authored libraries are stable enough that sync burden is minimal. `add-deps` is a fallback if a library is too big to vendor cleanly. Re-deriving is for tight, well-specified algorithms where there's no real reason to inherit from a library.
+
 ## What success does NOT require
 
 - Perfect EDN feature coverage. Tagged literals beyond `#inst` and `#uuid`, namespaced maps, custom readers — defer until someone asks.
