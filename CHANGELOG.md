@@ -8,7 +8,28 @@ once a 1.0 ships.
 
 ## [Unreleased]
 
-(Nothing yet. Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. See CLAUDE.md §2.)
+(Active dev cycle — see `plugin-release` in the source for the SNAPSHOT identity. Planned for `to edn`: `--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`. See CLAUDE.md §2.)
+
+## [0.112.2] — 2026-05-03 — Nushell-aligned versioning + CI
+
+Versioning scheme change. Same code as v0.3.0, but renumbered to align with the Nushell release the plugin targets — the convention used by `nu_plugin_endecode`, `nu_plugin_kdl`, and Nushell's own bundled plugins. From here on:
+
+- **Plugin version = Nushell version it's anchored to.** When Nushell 0.113.0 ships and we verify compat, the plugin gets re-released as 0.113.0. v0.3.0 / v0.2.0 / v0.1.0 stay browsable for historical context but won't have successors.
+- **Plugin-only patches between Nushell minors** (when needed) get a `-N` suffix: `0.112.2-1`, `0.112.2-2`, etc.
+- **Dev windows** carry a `-SNAPSHOT` suffix on `plugin-release` (visible via `plugin list | get version`) so users can tell tagged releases from in-flight code.
+
+### Added
+- Two version constants in the plugin source: `nushell-target` (sent in Hello — must match running Nushell) and `plugin-release` (sent in :Metadata — our own release identity, with optional `-SNAPSHOT`). The split makes CI version-sweeps possible without rewriting the source.
+- `NU_PLUGIN_EDN_NU_VERSION` env var override for `nushell-target`. Used by CI to test the plugin against multiple Nushell versions from a single source tree.
+- `bb release-check` task — refuses to ship a SNAPSHOT version. Run before tagging.
+- **GitHub Actions workflows**:
+  - `test.yml` — matrix CI on every push/PR. Currently sweeps `nushell: ['0.112.2']`; extend the matrix as we anchor against new Nushell minors.
+  - `nushell-drift.yml` — weekly cron (Mondays 06:00 UTC) that fetches the latest Nushell tag, tests the plugin against it, and **opens a PR** if green or **opens an issue** if red.
+  - `release.yml` — on `v*.*.*` tag push: validates the source's `plugin-release` matches the tag, refuses SNAPSHOTs, builds a version-suffixed asset, creates the GitHub Release.
+- README CI badge.
+
+### Changed
+- Asset filename convention: `nu_plugin_edn-vX.Y.Z` (no separate `-nu...` suffix anymore — the plugin version *is* the Nushell version under the new scheme).
 
 ## [0.3.0] — 2026-05-03 — `to edn` shipped, round-trip works
 

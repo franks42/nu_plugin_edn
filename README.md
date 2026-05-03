@@ -1,5 +1,7 @@
 # nu_plugin_edn
 
+[![test](https://github.com/franks42/nu_plugin_edn/actions/workflows/test.yml/badge.svg)](https://github.com/franks42/nu_plugin_edn/actions/workflows/test.yml)
+
 A Nushell plugin for parsing and emitting [EDN](https://github.com/edn-format/edn)
 (Extensible Data Notation, the Clojure data format).
 
@@ -28,27 +30,40 @@ keyword-prefix`, `--string-keys`) on the roadmap. See `CLAUDE.md` for
 the development plan and `bb-prototype-notes.md` for protocol-level
 notes.
 
+## Versioning
+
+The plugin version mirrors the Nushell version it's anchored against:
+plugin **0.112.2** pairs with Nushell **0.112.2**, plugin **0.113.0**
+will pair with Nushell **0.113.0**, etc. Older plugin versions stay
+installable on the GitHub Releases page so users on older Nushells
+can still grab a working build. Plugin-only bug fixes between Nushell
+minors (when they happen) get a `-N` patch suffix
+(`0.112.2-1`, `0.112.2-2`, ...).
+
 ## Requirements
 
-- Nushell 0.112.2 (other versions may need protocol updates — the anchor
-  is documented in `CLAUDE.md` and bumped deliberately)
-- [Babashka](https://babashka.org/) — `bb` on PATH
+- Nushell version matching the plugin version exactly — the protocol
+  does a strict equality check at registration. Mismatches fail with
+  `Plugin compiled for nushell version X, which is not compatible with version Y`.
+- [Babashka](https://babashka.org/) — `bb` on PATH.
 
 ## Install
 
 ```bash
-# Make the plugin executable
+# Pick the release matching your Nushell version. Example: Nushell 0.112.2
+curl -L https://github.com/franks42/nu_plugin_edn/releases/download/v0.112.2/nu_plugin_edn-v0.112.2 -o nu_plugin_edn
 chmod +x nu_plugin_edn
 
 # Register with Nushell
-plugin add ./nu_plugin_edn
-plugin use edn
+nu -c 'plugin add ./nu_plugin_edn; plugin use edn'
 ```
 
 To load on every Nushell start, add to your `config.nu`:
 ```nu
 plugin use edn
 ```
+
+The latest release is at <https://github.com/franks42/nu_plugin_edn/releases/latest>.
 
 ## Use
 

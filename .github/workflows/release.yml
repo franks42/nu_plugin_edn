@@ -1,0 +1,75 @@
+name: release
+
+# Triggered when a `vX.Y.Z` tag is pushed. Validates that the source's
+# plugin-release matches the tag and isn't a SNAPSHOT, then creates a
+# GitHub Release with the version-suffixed asset attached.
+#
+# To ship a release:
+#   1. Update plugin-release in nu_plugin_edn (drop -SNAPSHOT).
+#   2. Update CHANGELOG.
+#   3. Commit, push.
+#   4. git tag vX.Y.Z && git push origin vX.Y.Z
+#   5. This workflow takes it from there.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install babashka
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          bb: 'latest'
+
+      - name: Extract version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG"
+          echo "Version: $VERSION"
+
+      - name: Refuse to release a SNAPSHOT
+        run: bb release-check
+
+      - name: Verify plugin-release matches tag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          PLUGIN_REL=$(grep -oE '\(def plugin-release\s+"[^"]+"' nu_plugin_edn \
+                       | grep -oE '"[^"]+"$' \
+                       | tr -d '"')
+          if [ "$PLUGIN_REL" != "$VERSION" ]; then
+            echo "::error::Tag is v${VERSION} but plugin-release is \"${PLUGIN_REL}\""
+            exit 1
+          fi
+          echo "Tag and plugin-release agree: $VERSION"
+
+      - name: Build version-suffixed asset
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          ASSET="nu_plugin_edn-${TAG}"
+          cp nu_plugin_edn "/tmp/${ASSET}"
+          chmod +x "/tmp/${ASSET}"
+          echo "asset=/tmp/${ASSET}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          gh release create "$TAG" "$asset" \
+            --title "$TAG" \
+            --generate-notes

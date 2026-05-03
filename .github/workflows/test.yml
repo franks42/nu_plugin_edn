@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add Nushell versions here as we anchor against them.
+        # Each row runs the full lint + format + register + integration
+        # suite against that Nushell. The plugin's hardcoded fallback
+        # is overridden via NU_PLUGIN_EDN_NU_VERSION so a single source
+        # tree can be exercised across multiple Nushells.
+        nushell: ['0.112.2']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install babashka, clj-kondo, cljfmt
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          bb: 'latest'
+          clj-kondo: 'latest'
+          cljfmt: 'latest'
+
+      - name: Install Nushell ${{ matrix.nushell }}
+        run: |
+          curl -sL https://github.com/nushell/nushell/releases/download/${{ matrix.nushell }}/nu-${{ matrix.nushell }}-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo install nu-${{ matrix.nushell }}-x86_64-unknown-linux-gnu/nu /usr/local/bin/
+          nu --version
+
+      - name: Lint and format check
+        run: bb check
+
+      - name: Register plugin
+        env:
+          NU_PLUGIN_EDN_NU_VERSION: ${{ matrix.nushell }}
+        run: bb register
+
+      - name: Run integration tests
+        env:
+          NU_PLUGIN_EDN_NU_VERSION: ${{ matrix.nushell }}
+        run: bb test

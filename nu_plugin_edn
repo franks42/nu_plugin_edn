@@ -47,9 +47,27 @@
   (when-let [line (read-line)]
     (json/parse-string line true)))
 
+;; Two version constants — they answer different questions.
+;;
+;; `nushell-target` is what we send in Hello. Nushell does a strict
+;; equality check on it; if it doesn't match the running Nushell's
+;; version exactly, registration fails. CI sweeps versions by setting
+;; the env var; the hardcoded fallback is the project's anchored
+;; release version.
+;;
+;; `plugin-release` is what we send in :Metadata. It's our own release
+;; identity, decoupled from the protocol negotiation. During dev
+;; windows it carries a `-SNAPSHOT` suffix so users running `plugin list`
+;; can tell whether they're on a tagged release or in-flight code.
+;; The pre-tag `bb release-check` task refuses to ship a SNAPSHOT.
+(def nushell-target
+  (or (System/getenv "NU_PLUGIN_EDN_NU_VERSION") "0.112.2"))
+
+(def plugin-release "0.112.2")
+
 ;; Step 2: Hello exchange. We send first.
 (send-msg {:Hello {:protocol "nu-plugin"
-                   :version  "0.112.2"
+                   :version  nushell-target
                    :features []}})
 (let [hello (read-msg)]
   (log "got Hello:" (boolean hello)))
@@ -548,7 +566,7 @@
 (defn handle-call [call-id call-data]
   (cond
     (= "Metadata" call-data)
-    (send-msg {:CallResponse [call-id {:Metadata {:version "0.3.0"}}]})
+    (send-msg {:CallResponse [call-id {:Metadata {:version plugin-release}}]})
 
     (= "Signature" call-data)
     (send-msg {:CallResponse

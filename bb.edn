@@ -28,5 +28,24 @@
    :task (shell "cljfmt check nu_plugin_edn")}
 
   check
-  {:doc  "Run lint and fmt-check together. The 'always run before committing' task."
-   :depends [lint fmt-check]}}}
+  {:doc     "Run lint and fmt-check together. The 'always run before committing' task."
+   :depends [lint fmt-check]}
+
+  release-check
+  {:doc  "Refuse to release a SNAPSHOT version. Run before `git tag`."
+   :task (let [src (slurp "nu_plugin_edn")
+               m   (re-find (re-pattern "\\(def plugin-release\\s+\"([^\"]+)\"") src)
+               ver (second m)]
+           (cond
+             (nil? ver)
+             (do (println "ERROR: couldn't parse plugin-release from source")
+                 (System/exit 1))
+
+             (re-find (re-pattern "-SNAPSHOT") ver)
+             (do (println "ERROR: plugin-release is" (str "\"" ver "\"")
+                          "— refusing to release a SNAPSHOT version.")
+                 (println "       Drop the -SNAPSHOT suffix in nu_plugin_edn before tagging.")
+                 (System/exit 1))
+
+             :else
+             (println "OK: plugin-release is" (str "\"" ver "\""))))}}}
