@@ -123,13 +123,20 @@ Type fallback policy chosen for Nushell-native types without an EDN equivalent:
 
 Lossy by design — round-tripping these specific types isn't supported and isn't planned. A user who needs them can wrap manually before `to edn`.
 
-Planned flags (not yet implemented):
-- `--pretty` (`-p`) — pprint output instead of `pr-str` compact. Probably needs `clojure.pprint`; check that bb's pprint behaves correctly with the EDN reader literals (`#inst`, `#uuid`).
+Planned flags (only those that need plugin-side typed-value access — see "Plugin scope" below for the boundary principle):
 - `--meta <record>` — prefix the emitted top-level form with Clojure-reader-style metadata: `{a: 1} | to edn --meta {source: "nu", at: (date now)}` emits `^{:source "nu" :at #inst "..."} {:a 1}`. Useful for attaching provenance/context that a bb script on the receiving end can pick up via `(meta v)`. **Caveat**: `^{...}` is Clojure-reader syntax, not in the EDN spec proper — non-Clojure EDN parsers (Python, JS, Go) will reject it. Document this loudly. For pipelines that may reach non-Clojure consumers, the portable alternative is to wrap manually: `{context: {...} data: $val} | to edn`. We're not adding a separate `--wrap` flag for that — the wrap pattern is one line of Nushell, no plugin help needed.
 - `--keep-keyword-prefix` — opt-in keyword-fidelity emission, the inverse of the `from edn` flag of the same name. When set, strings that round-trip from EDN keywords (currently a string with no leading colon, no spaces) get re-emitted as keywords. Probably needs a heuristic on the producer side (e.g. only known field names) since pure strings and ex-keywords are indistinguishable in Nushell.
 - `--string-keys` — emit `{"name" "alice"}` instead of `{:name "alice"}`. For pipelines feeding non-Clojure EDN parsers that don't like keyword keys.
-- `--lines` — emit each list element as its own top-level form rather than wrapping in a vector. Mirror of `from edn --lines`.
-- `--canonical` (`-c`) — **exploration**. Emit byte-stable canonical EDN suitable for hashing / signing / content-addressing structured pipeline output. Use case: `data | to edn --canonical | sha256sum` (content hash), `data | to edn --canonical | bb sign.clj | bb verify.clj` (signature flow), Merkle trees over structured data, etc. Implementation candidate: [canonical-edn (cedn)](https://github.com/franks42/cedn) — same author, bb-compatible (74 tests passing on bb), zero production deps beyond Clojure, designed exactly for this. Open questions before shipping: (1) does adding cedn as a dep complicate the "no `:deps` needed" pitch? cedn is a single .cljc file; could possibly vendor it inline rather than declare. (2) interaction with `--pretty` (mutually exclusive — canonical has fixed whitespace). (3) interaction with `--meta` (canonical EDN spec doesn't include `^{...}` syntax — flag combo would need to error). (4) Nushell-native type fallbacks already produce canonical-stable primitives (ms ints, bytes ints, base64 strings) — round-trip stability there should be good. Worth a design spike before implementation.
+- `--lines` / `--objects` — emit each list element as its own top-level form. **Shipped in 0.112.2-SNAPSHOT.** See CHANGELOG.
+
+### Why `--pretty` and `--canonical` are NOT in the plugin
+
+These were planned earlier; we then realised they violate the **typed-value boundary principle** (see "Plugin scope" below). Both are pure text-on-text transformations of the EDN bytes the plugin already emits — they don't need access to Nushell typed values. Better realised as standalone bb-script filters in their own repos:
+
+- **Pretty-print**: a `pprint-edn` bb filter (`<edn> | pprint-edn`) wrapping `clojure.pprint`. Could live as a one-liner in user docs or as a small standalone tool.
+- **Canonical**: lives naturally in the [cedn](https://github.com/franks42/cedn) repo as a `cedn` filter binary (cedn library + ~5 LOC of stdin/stdout I/O), released alongside the cedn library on GitHub Releases. `data | to edn | cedn` composes via Unix pipes; no plugin coupling, no dep management for `nu_plugin_edn`, and the filter is reusable in any pipeline that produces EDN bytes (not just Nushell-driven ones).
+
+This principle cleans up the plugin's surface area significantly and lets each transformation evolve at its own cadence in its own repo.
 
 ### Concurrent plugin Calls in the same pipeline
 
@@ -206,7 +213,7 @@ Gaps (deliberately or as TODO):
 - **Error-case tests** — malformed EDN, missing closing brace, truncated input. The test file admits this gap in a comment. Add when error reporting (section 4) gets source spans.
 - **Megabyte-scale streaming tests** — current largest is 5000 records (~30 KB).
 - **Unbounded producer + `first N`** — works correctness-wise, but bb itself doesn't die on EPIPE so the test would leak processes; needs a non-bb producer (`yes`, `tail -f`) to be reliable.
-- **Per-flag tests** for the planned `to edn` flags (`--pretty`, `--meta`, `--lines`, `--keep-keyword-prefix`, `--string-keys`) — add as each lands.
+- **Per-flag tests** for the planned `to edn` flags (`--meta`, `--keep-keyword-prefix`, `--string-keys`) — add as each lands. (`--pretty` and `--canonical` were dropped from the plugin per the typed-value boundary principle; their tests live with whichever filter implements them.)
 
 A test fails if its expected output doesn't match. Don't catch and ignore errors in tests — let them fail loud.
 
@@ -272,40 +279,51 @@ Three workflows in `.github/workflows/`:
 - ⏳ The plugin is in the awesome-nu registry. (Submission needs a `language: clojure` PR to their `config.yaml` schema first — none of the existing accepted languages applies.)
 - ⏳ Issue #6415 gets a "fixed by external plugin" reference. (To be commented once awesome-nu submission lands.)
 
-## Ecosystem ideas — potential follow-on plugins
+## Plugin scope (the typed-value boundary principle)
 
-The plugin's protocol scaffolding (Hello/Metadata/Signature/Run dispatch, `pull-stream-msg` routing, two-version-constant scheme, `bb.edn` task layout, three-workflow CI matrix) is reusable. Once you've written one Clojure-shaped Nushell plugin, the next one is mostly filling in command-specific logic. Concrete candidates:
+`nu_plugin_edn`'s job is to translate between Nushell's value system and EDN text. **Anything that doesn't cross that boundary should not be in the plugin.** Concretely:
 
-### `nu_plugin_uuidv7`
+- ✅ **In scope**: `from edn` (EDN text → typed values), `to edn` (typed values → EDN text), and flags that affect how the typed walk happens (`--lines`/`--objects` iterate over input structure; `--meta` walks a record argument; `--keep-keyword-prefix` and `--string-keys` affect how typed values map to EDN tokens).
+- ❌ **Out of scope**: anything that's pure text-on-text transformation of EDN bytes after they've been emitted, or pre-parsed before they enter. Pretty-printing, canonicalization, schema validation, signing, hashing, encryption — none of these need typed-value access. They belong in standalone bb-script filters that compose via Unix pipes.
 
-Sibling to `nu_plugin_ulid` ([github.com/lizclipse/nu_plugin_ulid](https://github.com/lizclipse/nu_plugin_ulid)) but emitting **UUIDv7** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)) instead of ULID — same time-ordered sortable-ID niche, different format. UUIDv7 fits into existing UUID tooling (databases, libraries) where ULID requires custom support.
+The "Clojure-shaped Nushell ecosystem" pattern that emerges:
 
-Suggested commands:
-- `random uuid7` — generate a fresh UUIDv7. Mirrors `random ulid` and `random uuid`.
-- `parse uuid7` — extract `{timestamp: datetime, counter: ...}` record. Mirrors `parse ulid`.
-- `into uuid7` — synthesize a UUIDv7 from a given timestamp (analogous to `random ulid --zeroed` for deterministic-suffix generation).
+```
+                                                         ┌─→ cedn       (canonical)
+typed-value pipeline ─→ to edn ─→ EDN bytes ─→ pipe ─────┼─→ pprint-edn (pretty)
+(Nushell records,                                         ├─→ signet     (signing)
+ lists, etc.)                                             └─→ ...
+```
 
-Reference implementation: [uuidv7.cljc](../uuidv7.cljc) (FrankS, same author). Cross-platform Clojure library, ~50–100 LOC for the core algorithm. RFC 9562 Method 3 (monotonic random counter).
+Each downstream filter ships in its own repo (cedn, signet, etc.), versioned independently, with its own GitHub Releases distribution. nu_plugin_edn doesn't bundle them, doesn't have flags for them, and stays small.
 
-### `nu_plugin_cedn` (or `to edn --canonical` inside this plugin)
+## Ecosystem ideas — filters and adjacent plugins
 
-Canonical EDN — byte-stable, JCS-cross-validated EDN serialization for cryptographic signing/hashing/content-addressing. Reference: [canonical-edn (cedn)](https://github.com/franks42/cedn). Currently parked as a planned `--canonical` flag inside `nu_plugin_edn` (see §2 roadmap), but a separate plugin focused on `hash`, `sign`, `verify` over canonical-EDN output is also conceivable.
+Most "do something with EDN" needs are better satisfied as **bb-script filters living in their reference library's repo** rather than as Nushell plugins. The plugin model only earns its weight when typed-value access is genuinely needed (the `from edn` / `to edn` boundary).
 
-### Distribution caveat: external JAR deps complicate the single-file ship
+### Filters that should ship from their library repos
 
-The current `nu_plugin_edn` distribution model is "one executable bb script, no `:deps`, only bb-bundled libraries (`clojure.edn`, `cheshire`)." That model breaks if a plugin depends on external Clojure libraries (e.g. `com.github.franks42/uuidv7` from Maven), because:
+- **`cedn`** — canonical EDN filter, ~5 LOC bb script wrapping the [canonical-edn (cedn)](https://github.com/franks42/cedn) library. Ships from the cedn repo, versioned alongside the library, distributed via GitHub Releases just like `nu_plugin_edn` is. Use case: `data | to edn | cedn | sha256sum` for content hashing, `... | cedn | bb sign.clj` for signing flows. Cross-validated against JCS — output is structurally JSON-equivalent.
+- **`uuidv7`** — UUIDv7 generator/parser CLI, ships from [uuidv7.cljc](../uuidv7.cljc). Subcommands: `uuidv7 gen` (generate), `uuidv7 parse <id>` (extract `{timestamp ...}` as EDN), `uuidv7 from-ts <ts>` (synthesize from a given timestamp). Replaces what would otherwise be a `nu_plugin_uuidv7` — Nushell calls `^uuidv7 gen` like any external command, and `^uuidv7 parse $id | from edn` rehydrates a structured record.
+- **`pprint-edn`** — bb filter wrapping `clojure.pprint`. Could live in its own tiny repo or as a scripts-collection.
+- **Signet CLIs** — `signet-keygen`, `signet-sign`, `signet-verify`, etc., from the [signet](https://github.com/franks42/cljc-25519) repo (the cljc-25519 / signet library). Composable with `to edn | cedn` as the canonical-bytes producer.
 
-- A user grabbing the script alone can't run it — they'd need network/Maven access at first run.
-- bb's `:deps` resolution happens at script start, adding latency.
-- Distribution becomes "script + `bb.edn` + cache" rather than "one file."
+### Plugins that genuinely need to be plugins
 
-Three ways to keep the single-file model when a plugin wants library functionality:
+- **None planned beyond `nu_plugin_edn` itself**, given the boundary principle. Most "Clojure-shaped Nushell tool" ideas resolve into "bb-CLI in a Clojure library's repo" instead.
+- A `nu_plugin_<format>` plugin only earns its keep when the format has a typed surface in Nushell that can't be expressed as text-on-text (e.g., a binary format that needs structured Nushell output that goes beyond what `from edn` / `from json` can deliver).
 
-1. **Vendor inline.** Copy the relevant algorithm into the plugin script. For uuidv7.cljc the core is ~50 LOC; for cedn the published `dist/cedn.cljc` is single-file by design. Cost: manual sync when upstream changes (low for stable libraries with low churn). Same author = no licensing friction for FrankS-published libs.
-2. **`add-deps` at startup.** bb supports `(babashka.deps/add-deps {:deps {...}})` — resolves at first run, caches afterward. Single-file ship preserved, but adds cold-start latency (~hundreds of ms for resolution) and requires network on first run.
-3. **Re-derive directly.** For UUIDv7, the algorithm is small enough to implement using bb's stdlib (`java.util.UUID/randomUUID` + bit-twiddling per RFC 9562). No external dep needed, no upstream sync burden, but maintenance falls on the plugin author rather than tracking upstream's bug fixes.
+### Distribution pattern (recommended for any of the above filters)
 
-For follow-on plugins, **vendoring is probably the right default** — keeps the single-file pitch intact, and FrankS-authored libraries are stable enough that sync burden is minimal. `add-deps` is a fallback if a library is too big to vendor cleanly. Re-deriving is for tight, well-specified algorithms where there's no real reason to inherit from a library.
+Same model `nu_plugin_edn` uses now, scaled down:
+
+- Single executable bb script in the library's repo.
+- Versioned alongside the library (so `cedn` v1.2.0 ships with cedn library v1.2.0).
+- GitHub Releases with version-suffixed asset (`cedn-v1.2.0`, install as `cedn`).
+- Optional `bb release-check` discipline if the SNAPSHOT/release distinction matters.
+- Test workflow exercises the CLI via stdin/stdout fixtures.
+
+The `nu_plugin_edn` repo's `.github/workflows/release.yml` and `bb.edn` are reasonable templates to copy when bootstrapping these filters.
 
 ## What success does NOT require
 
