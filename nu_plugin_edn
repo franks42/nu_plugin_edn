@@ -8,9 +8,14 @@
 ;;   - Keywords lose round-trip fidelity: `:file` -> "file" (colon dropped).
 ;;     A `--keep-keyword-prefix` flag is planned for opt-in fidelity.
 ;;   - No `to edn` reverse direction yet
-;;   - No streaming input
 ;;   - Errors don't carry source spans
 ;;   - No tagged-literal support beyond what edn/read-string handles natively
+;;
+;; Input handling:
+;;   - String values (`'edn-text' | from edn`)            -> direct
+;;   - ByteStream from pipes (`bb produce.clj | from edn`) -> consumed
+;;     to a buffer first, then parsed. Whole-document only — the plugin
+;;     waits for End before parsing, so memory grows with input size.
 
 (require '[clojure.edn :as edn]
          '[cheshire.core :as json])
@@ -71,6 +76,64 @@
       (set? v)        {:List    {:vals (mapv ->nu-value v) :span span}}
       :else           {:String  {:val (pr-str v) :span span}})))
 
+;; ByteStream input handling.
+;;
+;; When the user pipes an external command into `from edn`, Nushell
+;; declares the input as a ByteStream (carrying a stream id) in the Run
+;; call, then pushes raw bytes via subsequent `Data` messages — each
+;; shaped like {:Data [<stream-id> {:Raw {:Ok [<byte-ints>...]}}]} —
+;; terminated by {:End <stream-id>}. We acknowledge each chunk with
+;; {:Ack <stream-id>} so the engine's backpressure window keeps moving;
+;; otherwise large inputs would stall. Once we see End we decode the
+;; accumulated bytes as UTF-8 and return the resulting string for
+;; edn/read-string. This is a buffered approach — the entire stream
+;; lands in memory before parsing — appropriate for typical config-
+;; sized inputs but not for log-sized ones.
+(defn read-byte-stream [stream-id]
+  (let [baos (java.io.ByteArrayOutputStream.)]
+    (loop []
+      (let [msg (read-msg)]
+        (cond
+          (nil? msg)
+          (.toString baos "UTF-8")
+
+          (and (map? msg) (contains? msg :End))
+          (.toString baos "UTF-8")
+
+          (and (map? msg) (contains? msg :Data))
+          (let [[id data] (:Data msg)]
+            (when (= id stream-id)
+              (when-let [bs (get-in data [:Raw :Ok])]
+                (doseq [b bs]
+                  (.write baos (int b))))
+              (send-msg {:Ack stream-id}))
+            (recur))
+
+          ;; Any other interleaved message (e.g. Drop) — keep reading.
+          :else (recur))))))
+
+;; Pull the EDN text out of whatever pipeline shape Nushell handed us.
+;; Three shapes show up in practice:
+;;   - "Empty"               — no upstream input; treat as empty string
+;;   - {:Value [v meta]}      — a single in-memory Value (e.g. literal string)
+;;   - {:ByteStream {:id N}}  — an external command's stdout
+;; ListStream isn't handled yet because EDN parsing wants one document,
+;; not a stream of values; if a user really wants `... | lines | from edn`
+;; they can pipe through `collect` first.
+(defn extract-input [input]
+  (cond
+    (= "Empty" input)
+    ""
+
+    (and (map? input) (contains? input :Value))
+    (or (get-in input [:Value 0 :String :val]) "")
+
+    (and (map? input) (contains? input :ByteStream))
+    (read-byte-stream (get-in input [:ByteStream :id]))
+
+    :else
+    ""))
+
 (defn handle-call [call-id call-data]
   (cond
     (= "Metadata" call-data)
@@ -99,8 +162,8 @@
 
     (and (map? call-data) (contains? call-data :Run))
     (let [run        (:Run call-data)
-          input-val  (get-in run [:input :Value 0])
-          input-str  (or (get-in input-val [:String :val]) "")]
+          input      (:input run)
+          input-str  (extract-input input)]
       (try
         (let [parsed (edn/read-string input-str)]
           (send-msg {:CallResponse

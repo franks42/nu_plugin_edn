@@ -63,6 +63,35 @@ check "cljsh: filter+sort" (
 check "keyword drops colon"        ('{:k :file}' | from edn | get k) "file"
 check "namespaced keyword keeps ns" ('{:k :foo/bar}' | from edn | get k) "foo/bar"
 
+# --- ByteStream input (piped from external commands) ---
+# These exercise the stream code path: Nushell delivers external command
+# stdout as a ByteStream, not a String Value, and the plugin must consume
+# Data/End messages and Ack each chunk.
+
+check "byte stream from echo" (
+    ^echo '{:greeting "hello"}' | from edn | get greeting
+) "hello"
+
+check "byte stream from bb" (
+    bb -e '(prn [{:n 1} {:n 2} {:n 3}])' | from edn | length
+) 3
+
+# Larger payload to exercise backpressure (multi-chunk stream).
+let big = (
+    bb -e '(prn (vec (for [i (range 1000)] {:idx i :pad (apply str (repeat 50 "x"))})))'
+    | from edn
+)
+check "byte stream large input - count" ($big | length) 1000
+check "byte stream large input - last"  ($big | last | get idx) 999
+
+# Using a temp file via `open` of a non-.edn extension also routes through
+# the byte stream path (.edn would auto-parse via the registered command).
+'{:from "file"}' | save /tmp/nu_plugin_edn_test.txt -f
+check "byte stream via open of .txt" (
+    open /tmp/nu_plugin_edn_test.txt | from edn | get from
+) "file"
+rm /tmp/nu_plugin_edn_test.txt
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

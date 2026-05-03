@@ -18,6 +18,7 @@ once a 1.0 ships.
 
 ### Fixed
 - EDN keywords now drop the leading colon when stringified (`:file` → `"file"`), with namespaces preserved (`:foo/bar` → `"foo/bar"`). Previously the colon survived, breaking idiomatic Nushell filters like `where type == "file"`.
+- **ByteStream input**: `bb produce.clj | from edn` now works directly — the plugin handles `ByteStream` pipeline input by consuming `Data` messages until `End`, acknowledging each chunk for backpressure. Previously a `| collect` workaround was required because the plugin only handled the `Value` input variant.
 
 ### Known limitations
 - No `to edn` direction yet.

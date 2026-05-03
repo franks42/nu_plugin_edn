@@ -61,15 +61,19 @@ plugin use edn
   | where size > 150
   | sort-by size --reverse
 
-# Pipe babashka script output through the plugin
+# Pipe babashka script output through the plugin (no extra glue needed)
 bb my-producer.clj | from edn | where status == "active" | length
+
+# `open` of a .edn file auto-parses via the registered command
+open config.edn | get :database
 ```
 
 ## Known limitations
 
 - **No `to edn` yet**: only the parsing direction is implemented.
-- **Whole-document only**: large EDN files are loaded into memory; no
-  streaming yet.
+- **Whole-document buffer**: byte stream input is consumed into memory
+  before parsing. Fine for configs (KB-MB), not ideal for log-sized
+  inputs. An EDN-per-line streaming mode is on the roadmap.
 - **Errors lack source spans**: parse errors show a message but don't
   highlight the offending location in the input.
 - **Keyword round-trip**: keywords stringify to bare strings (`:file`

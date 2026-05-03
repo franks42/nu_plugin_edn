@@ -43,6 +43,40 @@ Symptom: `Plugin failed to decode: missing field 'span'`. Sed-fix:
 offsets into the original source. Synthetic values can use
 `{:start 0 :end 0}` — Nushell accepts that without complaint.
 
+## ByteStream input
+
+When the user types `bb produce.clj | from edn`, Nushell sends the
+`Run` call with `:input` set to `{:ByteStream {:id N :span ... :type ...}}`
+— **not** a `Value`. The actual bytes arrive as separate messages
+*after* the Run call:
+
+```
+{:Data [<stream-id> {:Raw {:Ok [<byte-ints>...]}}]}   ; 0..N times
+{:End <stream-id>}
+```
+
+The plugin must:
+
+1. Read messages in a loop, dispatching on `:Data` / `:End`.
+2. Pull bytes out via `(get-in data [:Raw :Ok])` — they're a JSON array
+   of integers (because `Vec<u8>` serializes that way), not a base64
+   string.
+3. **Send `{:Ack <stream-id>}` after each `:Data`.** Nushell uses
+   acknowledgement-based backpressure; without acks, large streams stall
+   because the engine's send window fills up. Small inputs may work
+   without acks by coincidence — don't be misled.
+4. After `:End`, decode the accumulated bytes to a UTF-8 string and
+   feed it to `edn/read-string`.
+
+The signature can stay `(String, Any)`. Despite that declaration, Nushell
+delivers byte streams to plugins as streams (rather than auto-converting
+to a String Value the way it does for some built-in commands), so the
+plugin must do the conversion itself.
+
+Bonus side effect: once `from edn` is registered, `open file.edn`
+auto-parses via the registered command — users get table output without
+having to write `from edn`.
+
 ## Calls Nushell makes that aren't `Run`
 
 The first `Call` after Hello is **NOT** a Run. The sequence is:

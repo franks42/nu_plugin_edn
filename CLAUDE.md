@@ -111,11 +111,11 @@ Implementation hints:
 
 ### 3. Streaming input
 
-The prototype reads the whole input as a string before parsing. For large files (`open big.edn | from edn`), this loads the whole thing into memory. Nushell's plugin protocol supports `ListStream` input — see the protocol docs.
+ByteStream input from piped external commands is handled (the plugin consumes `Data` messages until `End`, ack-ing each chunk for backpressure), but the bytes are buffered into a single string before parsing — so memory grows with input size. For typical configs this is fine; for log-sized inputs it isn't.
 
-Streaming EDN is harder than streaming JSON because EDN doesn't have NDJSON-like conventions. Two approaches:
-- **Whole-document mode** (current prototype): fine for typical configs, breaks for log files.
-- **EDN-per-line mode**: each line is one EDN value. Compatible with `tools.deps`-style logs and bb script output. Add `from edn --lines` for this mode.
+Two further improvements would help:
+- **EDN-per-line mode**: each line is one EDN value. Compatible with `tools.deps`-style logs and bb script output. Add `from edn --lines` for this mode and emit values as they're parsed.
+- **True incremental parsing of a single document**: harder, because EDN's reader doesn't expose a streaming API in bb. Defer until a real user hits a memory wall.
 
 ### 4. Better error reporting
 
