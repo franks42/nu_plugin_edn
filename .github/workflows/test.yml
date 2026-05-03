@@ -19,10 +19,10 @@ jobs:
         # tree can be exercised across multiple Nushells.
         nushell: ['0.112.2']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install babashka, clj-kondo, cljfmt
-        uses: DeLaGuardo/setup-clojure@13.0
+        uses: DeLaGuardo/setup-clojure@13.6.0
         with:
           bb: 'latest'
           clj-kondo: 'latest'
