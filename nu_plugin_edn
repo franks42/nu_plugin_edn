@@ -81,8 +81,8 @@
       (keyword? v)    {:String  {:val (subs (str v) 1) :span span}}
       (symbol? v)     {:String  {:val (str v) :span span}}
       (map? v)        {:Record  {:val (into {} (for [[k vv] v]
-                                                  [(if (keyword? k) (subs (str k) 1) (str k))
-                                                   (->nu-value vv)]))
+                                                 [(if (keyword? k) (subs (str k) 1) (str k))
+                                                  (->nu-value vv)]))
                                  :span span}}
       (sequential? v) {:List    {:vals (mapv ->nu-value v) :span span}}
       (set? v)        {:List    {:vals (mapv ->nu-value v) :span span}}
@@ -304,7 +304,7 @@
         out-state  (atom {:out-sid out-sid :dropped? false})
         in-stream  (make-incremental-input-stream in-sid out-state)
         reader     (java.io.PushbackReader.
-                     (java.io.InputStreamReader. in-stream "UTF-8"))
+                    (java.io.InputStreamReader. in-stream "UTF-8"))
         eof-marker (Object.)
         span       {:start 0 :end 0}
         input-eof? (atom false)]
@@ -361,34 +361,34 @@
 (defn handle-call [call-id call-data]
   (cond
     (= "Metadata" call-data)
-    (send-msg {:CallResponse [call-id {:Metadata {:version "0.1.0"}}]})
+    (send-msg {:CallResponse [call-id {:Metadata {:version "0.2.0"}}]})
 
     (= "Signature" call-data)
     (send-msg
-      {:CallResponse
-       [call-id
-        {:Signature
-         [{:sig {:name "from edn"
-                 :description "Parse text as EDN."
-                 :extra_description "Converts EDN-formatted text into Nushell structured values."
-                 :search_terms ["edn" "clojure" "parse"]
-                 :required_positional []
-                 :optional_positional []
-                 :rest_positional nil
-                 :named [{:long "help"    :short "h" :arg nil :required false
-                          :desc "Display help"
-                          :var_id nil :default_value nil}
-                         {:long "lines"   :short "l" :arg nil :required false
-                          :desc "Parse the input as a sequence of top-level EDN forms; emit each as a separate value (ListStream output)."
-                          :var_id nil :default_value nil}
-                         {:long "objects" :short "o" :arg nil :required false
-                          :desc "Alias for --lines (mirrors `from json --objects` naming)."
-                          :var_id nil :default_value nil}]
-                 :input_output_types [["String" "Any"]]
-                 :allow_variants_without_examples true
-                 :is_filter false :creates_scope false :allows_unknown_args false
-                 :category "Formats"}
-           :examples []}]}]})
+     {:CallResponse
+      [call-id
+       {:Signature
+        [{:sig {:name "from edn"
+                :description "Parse text as EDN."
+                :extra_description "Converts EDN-formatted text into Nushell structured values."
+                :search_terms ["edn" "clojure" "parse"]
+                :required_positional []
+                :optional_positional []
+                :rest_positional nil
+                :named [{:long "help"    :short "h" :arg nil :required false
+                         :desc "Display help"
+                         :var_id nil :default_value nil}
+                        {:long "lines"   :short "l" :arg nil :required false
+                         :desc "Parse the input as a sequence of top-level EDN forms; emit each as a separate value (ListStream output)."
+                         :var_id nil :default_value nil}
+                        {:long "objects" :short "o" :arg nil :required false
+                         :desc "Alias for --lines (mirrors `from json --objects` naming)."
+                         :var_id nil :default_value nil}]
+                :input_output_types [["String" "Any"]]
+                :allow_variants_without_examples true
+                :is_filter false :creates_scope false :allows_unknown_args false
+                :category "Formats"}
+          :examples []}]}]})
 
     (and (map? call-data) (contains? call-data :Run))
     (let [run    (:Run call-data)

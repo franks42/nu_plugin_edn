@@ -15,6 +15,18 @@
   {:doc  "Register the plugin with Nushell (persists to plugin.msgpackz)."
    :task (shell "nu -c \"plugin add ./nu_plugin_edn\"")}
 
-  check
+  lint
   {:doc  "Lint the plugin source with clj-kondo. The plugin file has no extension, so we hint --lang clj."
-   :task (shell "clj-kondo --lint nu_plugin_edn --lang clj")}}}
+   :task (shell "clj-kondo --lint nu_plugin_edn --lang clj")}
+
+  fmt
+  {:doc  "Apply cljfmt formatting to the plugin source (mutates the file)."
+   :task (shell "cljfmt fix nu_plugin_edn")}
+
+  fmt-check
+  {:doc  "Verify cljfmt formatting without modifying the file. Non-zero exit on any diff."
+   :task (shell "cljfmt check nu_plugin_edn")}
+
+  check
+  {:doc  "Run lint and fmt-check together. The 'always run before committing' task."
+   :depends [lint fmt-check]}}}
