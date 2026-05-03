@@ -13,9 +13,13 @@
 ;;
 ;; Input handling:
 ;;   - String values (`'edn-text' | from edn`)            -> direct
-;;   - ByteStream from pipes (`bb produce.clj | from edn`) -> consumed
-;;     to a buffer first, then parsed. Whole-document only — the plugin
-;;     waits for End before parsing, so memory grows with input size.
+;;   - ByteStream + single-form mode                       -> buffered to
+;;     a string, then parsed. Whole-document, memory grows with input.
+;;   - ByteStream + --lines/--objects                      -> truly
+;;     incremental: bytes are pulled on demand, forms parsed and emitted
+;;     one at a time, engine Drop on the output stream stops further
+;;     reads. Required for unbounded producers (`tail -f`) and for
+;;     bounded but very large inputs combined with downstream `first N`.
 
 (require '[clojure.edn :as edn]
          '[cheshire.core :as json])
@@ -47,9 +51,10 @@
   (log "got Hello:" (boolean hello)))
 
 ;; Step 3: classify incoming control messages — they're not all maps.
-;; Ack and Drop messages from the engine arrive after we've finished
-;; emitting a ListStream (they reference our output stream id). Treat
-;; them as expected-but-ignored rather than :unknown.
+;; After a stream-y Run completes, leftover Data/End messages may arrive
+;; for input or output streams (especially when we exited early via Drop
+;; before the producer finished). Classify them all as :stream-ctl so
+;; the main loop drops them on the floor without log noise.
 (defn classify [msg]
   (cond
     (nil? msg)                                 :eof
@@ -58,6 +63,8 @@
     (and (map? msg) (contains? msg :Goodbye))  :goodbye
     (and (map? msg) (contains? msg :Ack))      :stream-ctl
     (and (map? msg) (contains? msg :Drop))     :stream-ctl
+    (and (map? msg) (contains? msg :Data))     :stream-ctl
+    (and (map? msg) (contains? msg :End))      :stream-ctl
     :else                                      :unknown))
 
 ;; Convert a parsed Clojure value into Nushell's value-record shape.
@@ -172,6 +179,163 @@
       (send-msg {:Data [sid {:List (->nu-value v)}]}))
     (send-msg {:End sid})))
 
+;; ----------------------------------------------------------------
+;; True input-side streaming for `--lines` / `--objects` over a
+;; ByteStream. (For the buffered single-form path, see read-byte-stream
+;; above; for the buffered list-output path, see emit-list-stream above.)
+;;
+;; Approach: a custom java.io.InputStream pulls bytes on demand from
+;; engine `:Data` messages. We chain it through InputStreamReader (UTF-8)
+;; and PushbackReader so that `clojure.edn/read` can parse forms one at
+;; a time over the live stream, even when a single form spans multiple
+;; `:Data` chunks. After each form we emit a `:Data` with the parsed
+;; value to our own output ListStream. When the producer's `:End`
+;; arrives, the InputStream returns -1 and edn/read returns the eof
+;; marker; we then send our own `:End` to close the output.
+;;
+;; The same stdin channel that delivers our input bytes also delivers
+;; control messages for our output (engine `:Drop` when downstream
+;; short-circuits, `:Ack` for backpressure tokens). The refill loop
+;; demultiplexes: it identifies messages by tag and stream id, queues
+;; output-control state in an atom that the emit loop can inspect, and
+;; only returns when input bytes (or input EOF) have arrived.
+;;
+;; Concurrency: single-threaded. Refill blocks on `read-msg`, so we
+;; only see `:Drop` between forms (specifically: when we next try to
+;; refill input after emitting a form). That's a fine granularity for
+;; the `| first N` pattern — we'll stop within a form or two — but
+;; means we can't cancel a producer that's in the middle of writing a
+;; very large single form.
+
+(defn- bytes-from-data [data]
+  ;; data is {:Raw {:Ok [byte-ints...]}} from serde of Result<Vec<u8>>.
+  ;; JSON ints are 0-255; convert to signed Java bytes via unchecked-byte.
+  (when-let [bs (get-in data [:Raw :Ok])]
+    (byte-array (mapv unchecked-byte bs))))
+
+(defn- refill-stream-input! [current eof? in-sid out-state]
+  ;; Read protocol messages until we get input bytes or input EOF for
+  ;; in-sid. Output-side messages (Drop/Ack on out-sid) update out-state
+  ;; and we keep reading. Other messages are logged and skipped.
+  (loop []
+    (let [msg (read-msg)]
+      (cond
+        (nil? msg)
+        (reset! eof? true)
+
+        (and (map? msg) (contains? msg :Data))
+        (let [[id data] (:Data msg)]
+          (if (= id in-sid)
+            (do (reset! current
+                        (java.io.ByteArrayInputStream. (bytes-from-data data)))
+                (send-msg {:Ack in-sid}))
+            (recur)))
+
+        (and (map? msg) (contains? msg :End))
+        (if (= (:End msg) in-sid)
+          (reset! eof? true)
+          (recur))
+
+        (and (map? msg) (contains? msg :Drop))
+        (do (when (= (:Drop msg) (:out-sid @out-state))
+              (swap! out-state assoc :dropped? true))
+            (recur))
+
+        (and (map? msg) (contains? msg :Ack))
+        (recur)
+
+        :else
+        (do (log "incremental refill ignoring:"
+                 (when (map? msg) (keys msg)))
+            (recur))))))
+
+(defn- make-incremental-input-stream [in-sid out-state]
+  ;; bb's `proxy` doesn't fall through to JDK default impls — every
+  ;; method InputStreamReader calls must be implemented here, including
+  ;; the no-arg read(), the multi-arg read variants, and `available`
+  ;; (which InputStreamReader's StreamDecoder consults).
+  ;;
+  ;; The 1-arg read delegates to the 3-arg form; the 3-arg form uses
+  ;; read-byte! for the first byte (refilling if needed) and then drains
+  ;; the current chunk without re-blocking, so a single InputStreamReader
+  ;; pull doesn't sit on read-msg waiting for the producer's next chunk
+  ;; once we've got data to return.
+  (let [current (atom (java.io.ByteArrayInputStream. (byte-array 0)))
+        eof?    (atom false)
+        read-byte!
+        (fn []
+          (loop []
+            (let [b (.read ^java.io.ByteArrayInputStream @current)]
+              (cond
+                (>= b 0) b
+                @eof?    -1
+                :else (do (refill-stream-input! current eof? in-sid out-state)
+                          (recur))))))]
+    (proxy [java.io.InputStream] []
+      (read
+        ([]
+         (read-byte!))
+        ([^bytes buf]
+         (.read ^java.io.InputStream this buf 0 (alength buf)))
+        ([^bytes buf ^long off ^long len]
+         (if (zero? len)
+           0
+           (let [first (read-byte!)]
+             (if (= first -1)
+               -1
+               (do (aset-byte buf off (unchecked-byte first))
+                   ;; Bulk-drain the current BAIS in one System.arraycopy
+                   ;; instead of looping byte-by-byte through the sci/Java
+                   ;; boundary — at 100K records this is ~5x faster.
+                   (let [more (.read ^java.io.ByteArrayInputStream @current
+                                     buf (inc off) (dec len))]
+                     (if (>= more 0) (+ 1 more) 1))))))))
+      (available []
+        ;; Bytes available without blocking = whatever's left in the
+        ;; current BAIS chunk. (We can't know what the producer will
+        ;; send next without reading a message, which would block.)
+        (.available ^java.io.ByteArrayInputStream @current))
+      (close []
+        ;; No-op — stdin is owned by the main loop, not us.
+        nil))))
+
+(defn emit-stream-incremental [call-id in-sid]
+  (let [out-sid    (alloc-stream-id)
+        out-state  (atom {:out-sid out-sid :dropped? false})
+        in-stream  (make-incremental-input-stream in-sid out-state)
+        reader     (java.io.PushbackReader.
+                     (java.io.InputStreamReader. in-stream "UTF-8"))
+        eof-marker (Object.)
+        span       {:start 0 :end 0}
+        input-eof? (atom false)]
+    (send-msg {:CallResponse
+               [call-id
+                {:PipelineData
+                 {:ListStream {:id out-sid :span span :metadata nil}}}]})
+    (try
+      (loop []
+        (when-not (:dropped? @out-state)
+          (let [v (edn/read {:eof eof-marker} reader)]
+            (if (= v eof-marker)
+              (reset! input-eof? true)
+              (do (send-msg {:Data [out-sid {:List (->nu-value v)}]})
+                  (recur))))))
+      (catch Throwable t
+        ;; Mid-stream parse error: we already opened a ListStream, so
+        ;; we can't switch to an Error response. Log to stderr; the
+        ;; user sees a truncated stream. Adding an embedded Error value
+        ;; as a final list element would be a polish improvement.
+        (log "parse error during incremental streaming:" (.getMessage t))))
+    ;; If we exited before the producer's End — i.e. `| first N` Drop'd
+    ;; us early — tell the engine to tear down the producer. For an
+    ;; unbounded source like `tail -f`, this is the only way to make it
+    ;; stop. Engine acknowledges by sending End on the input stream;
+    ;; remaining in-flight :Data messages will be classified as
+    ;; :stream-ctl in the main loop.
+    (when-not @input-eof?
+      (send-msg {:Drop in-sid}))
+    (send-msg {:End out-sid})))
+
 ;; Pull the EDN text out of whatever pipeline shape Nushell handed us.
 ;; Three shapes show up in practice:
 ;;   - "Empty"               — no upstream input; treat as empty string
@@ -227,24 +391,40 @@
            :examples []}]}]})
 
     (and (map? call-data) (contains? call-data :Run))
-    (let [run        (:Run call-data)
-          input      (:input run)
-          named      (get-in run [:call :named])
-          multi?     (or (flag-set? named "lines")
-                         (flag-set? named "objects"))
-          input-str  (extract-input input)]
-      (try
-        (if multi?
-          (emit-list-stream call-id (read-all-forms input-str))
-          (let [parsed (edn/read-string input-str)]
+    (let [run    (:Run call-data)
+          input  (:input run)
+          named  (get-in run [:call :named])
+          multi? (or (flag-set? named "lines")
+                     (flag-set? named "objects"))]
+      (cond
+        ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
+        ;; Bytes are pulled on demand; forms are emitted as they're parsed.
+        (and multi? (map? input) (contains? input :ByteStream))
+        (emit-stream-incremental call-id (get-in input [:ByteStream :id]))
+
+        ;; Multi-form mode + non-stream input (Value / Empty)  ->
+        ;; buffer the string, parse all forms, emit as a ListStream.
+        multi?
+        (try
+          (emit-list-stream call-id (read-all-forms (extract-input input)))
+          (catch Throwable t
             (send-msg {:CallResponse
                        [call-id
-                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]})))
-        (catch Throwable t
-          (send-msg {:CallResponse
-                     [call-id
-                      {:Error {:msg (str "EDN parse error: " (.getMessage t))
-                               :labels [] :code nil :url nil :help nil :inner []}}]}))))
+                        {:Error {:msg (str "EDN parse error: " (.getMessage t))
+                                 :labels [] :code nil :url nil :help nil :inner []}}]})))
+
+        ;; Single-form mode (default)  ->  buffered, return a single Value.
+        :else
+        (try
+          (let [parsed (edn/read-string (extract-input input))]
+            (send-msg {:CallResponse
+                       [call-id
+                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
+          (catch Throwable t
+            (send-msg {:CallResponse
+                       [call-id
+                        {:Error {:msg (str "EDN parse error: " (.getMessage t))
+                                 :labels [] :code nil :url nil :help nil :inner []}}]})))))
 
     :else
     (send-msg {:CallResponse

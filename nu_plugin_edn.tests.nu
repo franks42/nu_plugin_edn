@@ -135,6 +135,14 @@ check "lines: first N short-circuits" (
     bb -e '(doseq [i (range 100)] (prn {:i i}))' | from edn --lines | first 3 | length
 ) 3
 
+# Large incremental input — verifies the streaming InputStream + Drop
+# protocol handle multi-chunk producer output without buffering all of
+# it before parsing begins.
+check "lines: large producer + first N is correct" (
+    bb -e '(doseq [i (range 5000)] (prn {:i i}))'
+    | from edn --lines | first 5 | get i | math sum
+) 10
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

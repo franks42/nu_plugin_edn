@@ -77,6 +77,49 @@ Bonus side effect: once `from edn` is registered, `open file.edn`
 auto-parses via the registered command — users get table output without
 having to write `from edn`.
 
+## True input-side streaming (incremental ByteStream consumption)
+
+`--lines` / `--objects` over a `ByteStream` doesn't buffer the input —
+bytes are pulled on demand and forms are emitted as they're parsed.
+The interesting bits:
+
+**The custom `InputStream`.** A `proxy [java.io.InputStream]` whose
+`read()` pulls from a `ByteArrayInputStream` "current chunk" atom. When
+the chunk is empty, refill: call `read-msg` and dispatch by message
+type. `:Data` for our input stream id → replace the current chunk and
+ack. `:End` for our input stream id → flip the eof flag. `:Drop` /
+`:Ack` for our *output* stream → update an out-state atom that the
+emit loop polls between forms. Other messages → log and keep reading.
+
+**bb proxy gotcha — methods don't fall through to JDK defaults.** All
+three `read` arities must be implemented (`read()`, `read(byte[])`,
+`read(byte[], int, int)`), and you also need `available()` because
+`InputStreamReader`'s `StreamDecoder` calls it; without it you get
+`Method not implemented: available` thrown into `edn/read`. Symptoms
+are flaky — sometimes the error happens after a few forms, sometimes
+before any, depending on InputStreamReader's internal buffer
+threshold.
+
+**Bulk reads matter.** The 3-arg `read(byte[], int, int)` should pull
+the first byte through `read-byte!` (which may refill) and then
+delegate the rest to `(.read bais buf off len)` — a `System.arraycopy`
+inside the JDK rather than per-byte sci↔Java calls. ~5x faster on
+100K-record inputs.
+
+**Telling the engine "stop the producer".** When the emit loop exits
+before the input has signalled End (i.e. downstream short-circuited
+via `Drop` on our output), send `{:Drop <input-stream-id>}` so the
+engine can tear down the upstream producer. Required for `tail -f`-
+style unbounded inputs to terminate. (Caveat: bb itself doesn't die
+on EPIPE — a bb-specific quirk, separate from the plugin protocol.)
+
+**Demuxer noise after early termination.** When we Drop early, the
+engine has often already pushed more `:Data`/`:End` for the input
+stream that didn't make it into our refill loop in time. Those
+messages arrive on stdin after we return to the main loop. Classify
+them as `:stream-ctl` rather than `:unknown` so the main loop swallows
+them silently instead of logging.
+
 ## ListStream output
 
 To stream multiple values back to Nushell (rather than returning one

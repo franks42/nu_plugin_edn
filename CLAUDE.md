@@ -111,9 +111,12 @@ Implementation hints:
 
 ### 3. Streaming input
 
-ByteStream input from piped external commands is handled (the plugin consumes `Data` messages until `End`, ack-ing each chunk for backpressure), but the bytes are buffered into a single string before parsing — so memory grows with input size. For typical configs this is fine; for log-sized inputs it isn't.
+Both directions are now incremental:
 
-Multi-form mode (`--lines` / `--objects`) parses top-level forms and emits them as a `ListStream`, so downstream commands can short-circuit. The remaining gap is **input-side streaming**: today we still read the entire byte stream before parsing, so a 1M-record input is fully read even when `| first 5` is downstream. Closing this requires interleaving stdin reads with output writes — non-trivial because both Data (input bytes) and Drop (engine cancelling our output) arrive on stdin and the plugin currently does blocking line reads. Defer until a real user hits a memory wall.
+- **Single-form mode** (no flag) still buffers a `ByteStream` to a string before parsing — the right tradeoff for `'edn-text' | from edn` and similar single-document inputs.
+- **Multi-form mode** (`--lines` / `--objects`) over a `ByteStream` is fully streaming end-to-end: a custom `InputStream` pulls bytes on demand via `:Data` messages, `clojure.edn/read` parses one form at a time across chunk boundaries, parsed values are emitted to the output `ListStream` immediately, and a downstream `:Drop` on our output triggers a `:Drop` on the input so the engine can tear down unbounded producers (`tail -f`, infinite `(while true (prn ...))`).
+
+The remaining limitation is producer-side: bb's default behaviour is to swallow `EPIPE` on stdout, so a bb producer ignored by a `first N` keeps running after the engine closes the pipe (visible as orphaned bb processes). Other Unix producers (`tail -f`, `cat`, etc.) honour `EPIPE` and exit cleanly. This is a bb quirk, not a plugin issue.
 
 ### 4. Better error reporting
 

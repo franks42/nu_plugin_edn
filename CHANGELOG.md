@@ -18,6 +18,7 @@ once a 1.0 ships.
 
 ### Added
 - **Multi-form input mode** via `--lines` (`-l`) or `--objects` (`-o`) flags. With either flag, `from edn` parses the input as a sequence of top-level EDN forms and emits each as a separate value through a `ListStream`. Form boundaries are determined by the EDN reader itself (matched brackets, quoted strings, comments stripped) — not by newlines — so multi-line forms and comments work transparently. Downstream commands like `first 10` see a real stream and can short-circuit. The two flag names are aliases (`--lines` mirrors NDJSON conventions, `--objects` mirrors `from json --objects`).
+- **True input-side streaming** for `--lines` over a `ByteStream`. The plugin now pulls bytes from `:Data` messages on demand through a custom `InputStream` and parses one form at a time, so unbounded producers (`tail -f`, `(while true (prn ...))`) flow through without buffering and `| first N` cuts off the producer via a `:Drop` on the input stream. Single-form mode (no flag) and `--lines` over an in-memory `Value` keep the existing buffered fast path.
 
 ### Fixed
 - EDN keywords now drop the leading colon when stringified (`:file` → `"file"`), with namespaces preserved (`:foo/bar` → `"foo/bar"`). Previously the colon survived, breaking idiomatic Nushell filters like `where type == "file"`.
