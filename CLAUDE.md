@@ -65,13 +65,14 @@ If this plugin gets traction and the bb startup cost or dependency becomes a rea
 
 ## What's in the box
 
-- `nu_plugin_edn` — the plugin itself, executable bb script. Two commands registered (`from edn`, `to edn`), full protocol handshake, ByteStream input + ListStream input/output, multi-form mode with true incremental streaming. Latest tag: `v0.3.0`.
+- `nu_plugin_edn` — the plugin itself, executable bb script. Two commands registered (`from edn`, `to edn`), full protocol handshake, ByteStream input + ListStream input/output, multi-form mode with true incremental streaming. Latest tag: `v0.112.2` (Nushell-aligned versioning — see "Versioning scheme" below).
 - `nu_plugin_edn.tests.nu` — Nushell integration tests (47 cases, all passing on Nushell 0.112.2).
-- `bb.edn` — bb task entry points: `bb register`, `bb test`, `bb lint`, `bb fmt`, `bb fmt-check`, `bb check` (`lint` + `fmt-check` together — the pre-commit task). No external `:deps` — the plugin uses only libraries bundled with babashka (`clojure.edn`, `cheshire`).
+- `bb.edn` — bb task entry points: `bb register`, `bb test`, `bb lint`, `bb fmt`, `bb fmt-check`, `bb check` (lint + fmt-check; the pre-commit task), `bb release-check` (refuses to ship a SNAPSHOT version — run before `git tag`). No external `:deps` — the plugin uses only libraries bundled with babashka (`clojure.edn`, `cheshire`).
+- `.github/workflows/` — three CI workflows: `test.yml` (matrix CI on push/PR), `nushell-drift.yml` (weekly compat watcher; opens PR on green, issue on red), `release.yml` (auto-builds asset and creates GitHub Release on `v*.*.*` tag push).
 - `bb-prototype-notes.md` — protocol-level findings: handshake gotchas, ByteStream input, ListStream input/output, incremental-streaming machinery, bb-proxy quirks. Living document — append to it as you learn.
-- `README.md` — user-facing docs, install instructions, and `to edn` type-mappings table.
+- `README.md` — user-facing docs, install instructions, `to edn` type-mappings table, CI badge.
 - `LICENSE` — MIT.
-- `CHANGELOG.md` — Keep-a-Changelog format, `[Unreleased]` section maintained as features land.
+- `CHANGELOG.md` — Keep-a-Changelog format, `[Unreleased]` section heading carries the SNAPSHOT version during dev windows.
 
 ## What's working
 
@@ -147,20 +148,19 @@ Two distinct gaps:
 
 ### 5. Plugin signature and metadata
 
-Done: both commands have descriptions, search terms, category `"Formats"`, and registered flags. `:Metadata` reports the current release version. Both signatures live as named defs (`from-edn-sig`, `to-edn-sig`) at the top of the dispatch block so they're easy to extend.
+Done: both commands have descriptions, search terms, category `"Formats"`, and registered flags. `:Metadata` reports `plugin-release` (with the `-SNAPSHOT` suffix during dev, plain at release time). Both signatures live as named defs (`from-edn-sig`, `to-edn-sig`) at the top of the dispatch block so they're easy to extend.
 
 Still missing: `:examples` is empty for both commands. The protocol supports inline examples that surface in `help from edn` / `help to edn`; populating them (literal-string parses, the cljsh round-trip, `--lines` over a bb pipe, `to edn` of a record/table) is a small, high-value polish task. Author field on `:Metadata` is also unset.
 
 ### 6. Plugin registry conventions
 
-- Filename must start with `nu_plugin_` (already correct).
-- README should document install: `plugin add /path/to/nu_plugin_edn` then `plugin use edn`.
-- Submit to [awesome-nu](https://github.com/nushell/awesome-nu) once it's working.
-- Reference issue #6415 in the README.
+- Filename must start with `nu_plugin_` (already correct). Asset filename on releases is `nu_plugin_edn-vX.Y.Z`; users curl-then-rename to the canonical `nu_plugin_edn` for `plugin add`. README documents the one-liner.
+- Submit to [awesome-nu](https://github.com/nushell/awesome-nu) once a working release is in hand. **Blocker**: their `config.yaml` schema currently accepts `language: rust|python|go|typescript`. Adding `language: clojure` (or `babashka`) requires a PR to their schema first, then a separate PR adding our entry. Two-step.
+- Reference issue [#6415](https://github.com/nushell/nushell/issues/6415) in the awesome-nu submission and (eventually) on the issue itself.
 
-## Issues encountered building the prototype (gotchas)
+## Protocol gotchas
 
-These are real and will bite again:
+These bit during initial development and will bite again on every protocol-shape rework:
 
 **1. Encoding handshake direction.** Plugin sends encoding name to Nushell *first*, not the other way around. Format: one byte for length, then the name bytes ("json" = `\x04json`). Easy to get backwards from reading the protocol docs.
 
@@ -196,13 +196,59 @@ Gaps (deliberately or as TODO):
 
 A test fails if its expected output doesn't match. Don't catch and ignore errors in tests — let them fail loud.
 
-## Anchored Nushell version
+## Versioning scheme
 
-This plugin is anchored to **Nushell 0.112.2** as the development target. Test against this version. When updating to newer Nushell, expect protocol churn — check the [release notes](https://www.nushell.sh/blog/) for plugin protocol changes and update accordingly.
+**Plugin version mirrors the Nushell version it's anchored against.** v0.112.2 pairs with Nushell 0.112.2; v0.113.0 will pair with Nushell 0.113.0; etc. Same convention used by `nu_plugin_endecode`, `nu_plugin_kdl`, and Nushell's bundled plugins. Earlier semver-style releases (v0.1.0 / v0.2.0 / v0.3.0) stay browsable on the Releases page but won't have successors.
 
-If you run against newer Nushell, do NOT silently update the version anchor in this file; bump it deliberately and verify all tests still pass.
+Plugin-only patches between Nushell minors (when needed) get a `-N` suffix: `0.112.2-1`, `0.112.2-2`, etc.
 
-History: anchor moved 0.110.0 → 0.112.2 after inspecting `git log 0.110.0..0.112.2 -- crates/nu-plugin-protocol/ crates/nu-plugin/` in the upstream repo and confirming no wire-protocol shape changes (only internal Rust refactors and version bumps).
+### Two version constants in the source
+
+The plugin file has **two** version strings, answering different questions:
+
+```clojure
+(def nushell-target
+  (or (System/getenv "NU_PLUGIN_EDN_NU_VERSION") "0.112.2"))
+
+(def plugin-release "0.112.2-SNAPSHOT")
+```
+
+- **`nushell-target`** is sent in the `Hello` message. Nushell does a strict equality check against the running version; if it doesn't match, registration fails. The `NU_PLUGIN_EDN_NU_VERSION` env-var override lets CI sweep across Nushell versions from a single source tree without rewriting the source.
+- **`plugin-release`** is sent in the `:Metadata` response. It's our own release identity, decoupled from the protocol negotiation. During dev windows it carries a `-SNAPSHOT` suffix that's visible to users via `plugin list | get version`. The `bb release-check` task refuses to ship a SNAPSHOT.
+
+### Release dance
+
+To ship the next release after Nushell ships a new version:
+
+1. (Probably automated by `nushell-drift.yml`) — bump `nushell-target` to the new Nushell version, set `plugin-release` to `<new>-SNAPSHOT`. Verify tests pass.
+2. Land any plugin-only changes during the SNAPSHOT window.
+3. Drop the `-SNAPSHOT` suffix on `plugin-release`.
+4. `bb check` (lint + fmt clean) and `bb release-check` (no SNAPSHOT).
+5. Update CHANGELOG: cut `[<version>]` from `[Unreleased]`.
+6. `git commit && git tag v<version> && git push origin main && git push origin v<version>`.
+7. `release.yml` builds the asset and creates the GitHub Release.
+8. Bump `plugin-release` back to the next `-SNAPSHOT` (the start of the next dev window). Commit, push.
+
+### When the upstream protocol changes
+
+If `nushell-drift.yml` opens an issue ("Nushell X.Y.Z compat broken") rather than a PR, the protocol or behaviour shifted. Procedure:
+
+1. Diff `crates/nu-plugin-protocol/` and `crates/nu-plugin/` between the previously-anchored version and the new one in the upstream Nushell repo. Look for serialization-shape changes — new required fields, renamed variants, removed messages.
+2. Fix the plugin (`nu_plugin_edn`) to match. `bb-prototype-notes.md` documents the wire shapes we depend on.
+3. Run `bb test` against the new Nushell. Iterate until green.
+4. Then proceed with the release dance above.
+
+History: anchor moved 0.110.0 → 0.112.2 during initial development after inspecting `git log 0.110.0..0.112.2 -- crates/nu-plugin-protocol/ crates/nu-plugin/` and confirming no wire-protocol shape changes (only internal Rust refactors).
+
+## CI / GitHub Actions
+
+Three workflows in `.github/workflows/`:
+
+- **`test.yml`** — runs on every push to `main` and every PR. Strategy matrix over Nushell versions; currently `[0.112.2]`. Each row installs that Nushell, sets `NU_PLUGIN_EDN_NU_VERSION` to match, runs `bb check` (lint + fmt-check) and the integration suite. To extend coverage when we anchor against a new Nushell, just add to the matrix. Uses `actions/checkout@v6` and `DeLaGuardo/setup-clojure@13.6.0`.
+
+- **`nushell-drift.yml`** — runs on a Monday-06:00-UTC cron, with manual `workflow_dispatch` for testing. Fetches the latest Nushell tag, compares to `nushell-target`, exits clean if they match. If newer, installs that Nushell, runs the suite with the env-var override, and: opens a PR (with the source bumps and `-SNAPSHOT` suffix) on green, opens an issue (with the failure log) on red. Both PR and issue carry the `nushell-compat` label. Permissions in the workflow: `contents: write`, `pull-requests: write`, `issues: write`.
+
+- **`release.yml`** — runs on `v*.*.*` tag push. Validates that `plugin-release` matches the tag and isn't a SNAPSHOT (via `bb release-check`), builds the version-suffixed asset (`nu_plugin_edn-vX.Y.Z`), creates the GitHub Release with `--generate-notes`. Auto-generated notes are minimal — usually worth manually polishing the release body via `gh release edit` afterward.
 
 ## What success looks like
 
@@ -225,3 +271,4 @@ History: anchor moved 0.110.0 → 0.112.2 after inspecting `git log 0.110.0..0.1
 - Document protocol-level findings in `bb-prototype-notes.md` as you discover them. The protocol is under-documented; this file is part of the contribution.
 - When in doubt about Nushell behavior, run the plugin against real Nushell and observe; don't reason from docs alone.
 - **Always lint and format Clojure code after edits.** After any change to `nu_plugin_edn` (the plugin source) or `bb.edn`, run `bb check` (clj-kondo + cljfmt check). If `bb check` fails on formatting, run `bb fmt` to apply, then re-run `bb check`. Never commit code that hasn't been through both. This is non-negotiable — do not rely on the user to remind you.
+- **Always `bb release-check` before tagging a release.** It refuses to ship a SNAPSHOT version. The release workflow runs it too, so a violation will fail CI rather than ship — but catching it locally is faster.
