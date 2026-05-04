@@ -292,6 +292,76 @@ check "to edn --lines: bb-streamed round-trip via chained plugin Calls" (
     | get i | math sum
 ) 3
 
+# --- to edn --pprint ---
+
+check "to edn --pprint: simple value compact still on one line" (
+    {a: 1, b: 2} | to edn --pprint | str trim
+) "{:a 1, :b 2}"
+
+check "to edn --pprint: nested value splits across lines" (
+    {users: [{name: "a"} {name: "b"}], count: 2} | to edn --pprint | str contains "\n"
+) true
+
+check "to edn --pprint: round-trips through from edn" (
+    {a: 1, b: [2 3 4]} | to edn --pprint | from edn
+) {a: 1, b: [2 3 4]}
+
+check "to edn --pprint --lines: error" (
+    try {
+        {a: 1} | to edn --pprint --lines
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
+check "to edn --pprint --objects: error" (
+    try {
+        {a: 1} | to edn --pprint --objects
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
+# --- from edn --set2record / to edn --record2set ---
+# Sets in EDN are parsed as Nushell lists by default; opt into the
+# `{k: k}` mirror-record convention via these paired flags. The
+# round-trip is loss-free for keyword/string sets only — see the
+# README for the full type-mapping table.
+
+check "from edn (default): set becomes a list" (
+    "#{:a :b :c}" | from edn | sort
+) ["a" "b" "c"]
+
+check "from edn --set2record: keyword set becomes mirror record" (
+    "#{:admin :viewer}" | from edn --set2record | columns | sort
+) [admin viewer]
+
+check "from edn --set2record: every value equals its key" (
+    "#{:admin :viewer :editor}" | from edn --set2record
+    | items {|k v| $k == $v}
+    | all { |x| $x }
+) true
+
+check "to edn --record2set: mirror record emits as set" (
+    # Set element ordering isn't deterministic; parse back and sort.
+    {admin: "admin", viewer: "viewer"} | to edn --record2set | from edn | sort
+) ["admin" "viewer"]
+
+check "to edn --record2set: non-mirror record stays a map" (
+    {a: "x", b: "y"} | to edn --record2set
+) '{:a "x", :b "y"}'
+
+check "to edn --record2set: empty record stays a map" (
+    {} | to edn --record2set
+) "{}"
+
+# Round-trip via the pair: EDN set -> mirror record -> EDN set.
+check "set2record + record2set: round-trip preserves keyword set" (
+    "#{:admin :viewer :editor}"
+    | from edn --set2record
+    | to edn --record2set
+    | from edn
+    | sort
+) ["admin" "editor" "viewer"]
+
 # --- error cases ---
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than

@@ -26,6 +26,7 @@
 ;;     bounded but very large inputs combined with downstream `first N`.
 
 (require '[clojure.edn :as edn]
+         '[clojure.pprint :as pprint]
          '[cheshire.core :as json])
 
 (defn log [& args]
@@ -92,6 +93,24 @@
 ;; Convert a parsed Clojure value into Nushell's value-record shape.
 ;; Each leaf carries a `span` (Nushell wants source-span info even for
 ;; values that didn't come from source — `{:start 0 :end 0}` is fine).
+;;
+;; Dynamic var `*set-as-record*` (bound by handle-from-edn when the
+;; user passes --set2record): when true, EDN sets are emitted as
+;; Nushell records in mirror form ({k: k} where each key equals its
+;; stringified element). Pairs with `to edn --record2set` for round-
+;; trip. Default (false) → sets become Nushell lists.
+(def ^:dynamic *set-as-record* false)
+
+(defn- set-element-key
+  "Stringify a set element to its mirror-record key. EDN keywords drop
+  the leading colon (matching the rest of our keyword convention);
+  strings stay as-is; everything else falls back to `pr-str`."
+  [item]
+  (cond
+    (keyword? item) (subs (str item) 1)
+    (string? item)  item
+    :else           (pr-str item)))
+
 (defn ->nu-value [v]
   (let [span {:start 0 :end 0}]
     (cond
@@ -116,7 +135,16 @@
                                                   (->nu-value vv)]))
                                  :span span}}
       (sequential? v) {:List    {:vals (mapv ->nu-value v) :span span}}
-      (set? v)        {:List    {:vals (mapv ->nu-value v) :span span}}
+      (set? v)
+      (if *set-as-record*
+        ;; Mirror form: {k: k} for each set element. Round-trips via
+        ;; `to edn --record2set` for keyword/string sets. Lossy for
+        ;; non-string elements (Nushell record keys are strings only).
+        {:Record {:val (into {} (for [item v]
+                                  (let [k (set-element-key item)]
+                                    [k {:String {:val k :span span}}])))
+                  :span span}}
+        {:List {:vals (mapv ->nu-value v) :span span}})
       :else           {:String  {:val (pr-str v) :span span}})))
 
 ;; Inverse of ->nu-value: convert a Nushell wire-protocol Value back to
@@ -136,6 +164,26 @@
 ;;   - List                  -> Clojure vector
 ;;   - Range / Closure / CellPath / CustomValue / Error -> string
 ;;     fallback marked with `#<...>` so the user sees what was lost
+;;
+;; Dynamic var `*record-as-set*` (bound by handle-to-edn when the user
+;; passes --record2set): when true, a Record whose entries are all
+;; "mirror form" (keyword key whose name equals the string value) is
+;; converted to a Clojure set instead of a map. Round-trip pair with
+;; `from edn --set2record`. Default (false) → records always become
+;; maps. The check is per-record (per-call), so nested records each
+;; get evaluated independently.
+(def ^:dynamic *record-as-set* false)
+
+(defn- record-mirror-form?
+  "True iff every entry of m is a [keyword string] pair where (name k) == v.
+  This is the convention that `from edn --set2record` produces and that
+  `to edn --record2set` opts to interpret as a set."
+  [m]
+  (and (seq m)
+       (every? (fn [[k v]]
+                 (and (keyword? k) (string? v) (= (name k) v)))
+               m)))
+
 (defn nu->clj [v]
   (cond
     (contains? v :Nothing)  nil
@@ -162,8 +210,14 @@
                                        (get-in v [:Binary :val]))))
 
     (contains? v :Record)
-    (into {} (for [[k vv] (get-in v [:Record :val])]
-               [k (nu->clj vv)]))
+    (let [m (into {} (for [[k vv] (get-in v [:Record :val])]
+                       [k (nu->clj vv)]))]
+      (if (and *record-as-set* (record-mirror-form? m))
+        ;; Mirror-form record + --record2set flag → emit as a set of
+        ;; keywords (one per key). Treats the convention as "the
+        ;; record represents a keyword set."
+        (set (keys m))
+        m))
 
     (contains? v :List)
     (mapv nu->clj (get-in v [:List :vals]))
@@ -518,6 +572,9 @@
                   :var_id nil :default_value nil}
                  {:long "objects" :short "o" :arg nil :required false
                   :desc "Alias for --lines (mirrors `from json --objects` naming)."
+                  :var_id nil :default_value nil}
+                 {:long "set2record" :short nil :arg nil :required false
+                  :desc "Render EDN sets as Nushell records in mirror form ({k: k} where each key equals its stringified element) instead of lists. Round-trip pair with `to edn --record2set`. Lossy for non-keyword/string set elements (Nushell record keys are strings only)."
                   :var_id nil :default_value nil}]
          :input_output_types [["String" "Any"]]
          :allow_variants_without_examples true
@@ -556,6 +613,12 @@
                   :var_id nil :default_value nil}
                  {:long "objects" :short "o" :arg nil :required false
                   :desc "Emit each top-level form separated by single spaces, no newlines. Compact concatenated-objects output."
+                  :var_id nil :default_value nil}
+                 {:long "pprint"  :short "p" :arg nil :required false
+                  :desc "Pretty-print the output via clojure.pprint instead of compact pr-str. Mutually exclusive with --lines and --objects."
+                  :var_id nil :default_value nil}
+                 {:long "record2set" :short nil :arg nil :required false
+                  :desc "If a record is in mirror form ({k: k} where every key equals its value), emit it as an EDN set instead of a map. Round-trip pair with `from edn --set2record`. Non-mirror records stay as maps."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -583,29 +646,30 @@
         named  (get-in run [:call :named])
         multi? (or (flag-set? named "lines")
                    (flag-set? named "objects"))]
-    (cond
-      ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
-      ;; Bytes are pulled on demand; forms are emitted as they're parsed.
-      (and multi? (map? input) (contains? input :ByteStream))
-      (emit-stream-incremental call-id (get-in input [:ByteStream :id]))
+    (binding [*set-as-record* (flag-set? named "set2record")]
+      (cond
+        ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
+        ;; Bytes are pulled on demand; forms are emitted as they're parsed.
+        (and multi? (map? input) (contains? input :ByteStream))
+        (emit-stream-incremental call-id (get-in input [:ByteStream :id]))
 
-      ;; Multi-form mode + non-stream input (Value / Empty)  ->
-      ;; buffer the string, parse all forms, emit as a ListStream.
-      multi?
-      (try
-        (emit-list-stream call-id (read-all-forms (extract-input input)))
-        (catch Throwable t
-          (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))
+        ;; Multi-form mode + non-stream input (Value / Empty)  ->
+        ;; buffer the string, parse all forms, emit as a ListStream.
+        multi?
+        (try
+          (emit-list-stream call-id (read-all-forms (extract-input input)))
+          (catch Throwable t
+            (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))
 
-      ;; Single-form mode (default)  ->  buffered, return a single Value.
-      :else
-      (try
-        (let [parsed (edn/read-string (extract-input input))]
-          (send-msg {:CallResponse
-                     [call-id
-                      {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
-        (catch Throwable t
-          (send-error-response call-id (str "EDN parse error: " (.getMessage t))))))))
+        ;; Single-form mode (default)  ->  buffered, return a single Value.
+        :else
+        (try
+          (let [parsed (edn/read-string (extract-input input))]
+            (send-msg {:CallResponse
+                       [call-id
+                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
+          (catch Throwable t
+            (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))))))
 
 ;; Collect a ListStream input into a vector of Values. The engine
 ;; sends {:Data [<id> {:List <value>}]} messages until {:End <id>}.
@@ -622,68 +686,89 @@
           (send-msg {:Ack stream-id})
           (recur (conj acc (:List data))))))))
 
+(defn- emit-clj
+  "Serialize a Clojure value to EDN text. Compact (`pr-str`) by default;
+  pretty-printed via clojure.pprint when `pprint?` is true. pprint
+  output already includes a trailing newline, which we keep."
+  [v pprint?]
+  (if pprint?
+    (with-out-str (pprint/pprint v))
+    (pr-str v)))
+
 (defn handle-to-edn [call-id run]
-  ;; Three output modes, controlled by flags:
+  ;; Output modes, controlled by flags:
   ;;   - default     : emit ONE form (input is wrapped as-is). Vector
   ;;                   for a list/table; map for a record; etc.
   ;;   - --lines     : emit each top-level item with a trailing newline.
-  ;;                   For a List/ListStream input, items are the elements.
-  ;;                   For a scalar/record input, the single value is one item.
-  ;;   - --objects   : same item iteration, single space separator instead
-  ;;                   of newline. EDN forms self-delimit, so the space is
-  ;;                   purely defensive — keeps the output streamable.
+  ;;   - --objects   : same iteration, single space separator instead
+  ;;                   of newline.
+  ;;   - --pprint    : pretty-print via clojure.pprint. Single-form only;
+  ;;                   mutually exclusive with --lines and --objects.
   ;;
   ;; --lines and --objects are NOT synonyms here (unlike on `from edn`,
   ;; where parsing is whitespace-agnostic). Different separator semantics.
-  (let [input  (:input run)
-        named  (get-in run [:call :named])
-        lines? (flag-set? named "lines")
-        objs?  (flag-set? named "objects")
-        multi? (or lines? objs?)]
-    (try
-      (cond
-        (and (map? input) (contains? input :ByteStream))
-        (send-error-response
-         call-id
-         "to edn requires a structured value or list-stream input (got raw bytes)")
+  ;;
+  ;; Content transformation is independent of layout: --record2set
+  ;; converts mirror-form records to EDN sets at any nesting depth,
+  ;; and combines freely with any of the layout flags above.
+  (let [input   (:input run)
+        named   (get-in run [:call :named])
+        lines?  (flag-set? named "lines")
+        objs?   (flag-set? named "objects")
+        pprint? (flag-set? named "pprint")
+        multi?  (or lines? objs?)]
+    (cond
+      (and pprint? multi?)
+      (send-error-response
+       call-id
+       "--pprint cannot be combined with --lines or --objects")
 
-        :else
-        (let [items (cond
-                      (= "Empty" input)
-                      []
+      (and (map? input) (contains? input :ByteStream))
+      (send-error-response
+       call-id
+       "to edn requires a structured value or list-stream input (got raw bytes)")
 
-                      (and (map? input) (contains? input :Value))
-                      (let [v (get-in input [:Value 0])]
-                        (if (and multi? (contains? v :List))
-                          (get-in v [:List :vals])
-                          [v]))
+      :else
+      (binding [*record-as-set* (flag-set? named "record2set")]
+        (try
+          (let [items (cond
+                        (= "Empty" input)
+                        []
 
-                      (and (map? input) (contains? input :ListStream))
-                      (let [vals (read-list-stream (get-in input [:ListStream :id]))]
-                        (if multi?
-                          vals
-                          ;; Single-form mode: re-wrap as one List Value.
-                          [{:List {:vals vals :span {:start 0 :end 0}}}]))
+                        (and (map? input) (contains? input :Value))
+                        (let [v (get-in input [:Value 0])]
+                          (if (and multi? (contains? v :List))
+                            (get-in v [:List :vals])
+                            [v]))
 
-                      :else [])
-              edn-str (cond
-                        lines?
-                        (apply str (map #(str (pr-str (nu->clj %)) "\n") items))
+                        (and (map? input) (contains? input :ListStream))
+                        (let [vals (read-list-stream (get-in input [:ListStream :id]))]
+                          (if multi?
+                            vals
+                            ;; Single-form mode: re-wrap as one List Value.
+                            [{:List {:vals vals :span {:start 0 :end 0}}}]))
 
-                        objs?
-                        (apply str (map #(str (pr-str (nu->clj %)) " ") items))
+                        :else [])
+                edn-str (cond
+                          lines?
+                          (apply str (map #(str (pr-str (nu->clj %)) "\n") items))
 
-                        :else
-                        ;; Single-form mode preserves the original behaviour:
-                        ;; Empty -> "nil", anything else -> pr-str of the value.
-                        (pr-str (when-let [v (first items)] (nu->clj v))))
-              span {:start 0 :end 0}]
-          (send-msg {:CallResponse
-                     [call-id
-                      {:PipelineData
-                       {:Value [{:String {:val edn-str :span span}} nil]}}]})))
-      (catch Throwable t
-        (send-error-response call-id (str "EDN serialization error: " (.getMessage t)))))))
+                          objs?
+                          (apply str (map #(str (pr-str (nu->clj %)) " ") items))
+
+                          :else
+                          ;; Single-form mode preserves the original
+                          ;; behaviour: Empty -> "nil", anything else
+                          ;; -> serialized form of the value.
+                          (emit-clj (when-let [v (first items)] (nu->clj v))
+                                    pprint?))
+                span {:start 0 :end 0}]
+            (send-msg {:CallResponse
+                       [call-id
+                        {:PipelineData
+                         {:Value [{:String {:val edn-str :span span}} nil]}}]}))
+          (catch Throwable t
+            (send-error-response call-id (str "EDN serialization error: " (.getMessage t)))))))))
 
 (defn handle-call [call-id call-data]
   (cond

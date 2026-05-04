@@ -159,12 +159,33 @@ reference libraries. They compose with `nu_plugin_edn` via Unix pipes:
 | `Float`           | float                     |                                |
 | `String`          | `"..."`                   |                                |
 | `Date`            | `#inst "..."`             | round-trips                    |
-| `Record`          | `{:k v ...}`              | keyword keys                   |
+| `Record`          | `{:k v ...}`              | keyword keys; with `--record2set`, mirror-form `{k: k}` records emit as `#{:k ...}` (keyword sets) |
 | `List` / table    | `[v ...]`                 |                                |
 | `Duration`        | integer milliseconds      | lossy: ns precision dropped    |
 | `Filesize`        | integer bytes             | unit dropped                   |
 | `Binary`          | base64 string             | not a tagged literal           |
 | `Range`, `Closure`, `CellPath`, `CustomValue`, `Error` | `"#<TypeName>"` placeholder | best-effort, not round-trippable |
+
+### EDN sets
+
+By default, EDN sets become Nushell lists (Nushell has no native set type). Opt into a `{k: k}` mirror-record convention via the paired flags:
+
+```nu
+'#{:admin :viewer :editor}' | from edn                    # → [admin viewer editor]    (default — list)
+'#{:admin :viewer :editor}' | from edn --set2record       # → {admin: admin, viewer: viewer, editor: editor}
+{admin: "admin" viewer: "viewer"} | to edn --record2set   # → #{:admin :viewer}
+```
+
+`from edn --set2record` + `to edn --record2set` round-trip a keyword/string set without loss. Caveats: int and composite-element sets degrade — Nushell record keys are strings only.
+
+### Pretty-print vs compact
+
+```nu
+{a: 1, b: [2 3 4]} | to edn              # compact:  {:a 1, :b [2 3 4]}
+{a: 1, b: [2 3 4]} | to edn --pprint     # pprinted (indented, multi-line for nested data)
+```
+
+`--pprint` is mutually exclusive with `--lines` / `--objects`. For canonical (byte-stable) output suitable for hashing/signing, pipe through the [`cedn` CLI](https://github.com/franks42/canonical-edn) instead — different tool, different purpose.
 
 ## Known limitations
 

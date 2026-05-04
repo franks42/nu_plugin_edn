@@ -10,6 +10,19 @@ once a 1.0 ships.
 
 (Active dev cycle. Drop the `-SNAPSHOT` suffix on `plugin-release` before tagging the next release.)
 
+### Added (post-v0.112.2-1)
+
+- **`to edn --pprint`** (`-p`): pretty-print output via `clojure.pprint` instead of compact `pr-str`. Mutually exclusive with `--lines` / `--objects`.
+- **`from edn --set2record`** + **`to edn --record2set`** — paired flags for round-tripping keyword/string EDN sets through Nushell records in mirror form (`{k: k}`). Default behaviour (set → list) is unchanged. Loss-free for keyword/string sets only; int and composite-element sets degrade since Nushell record keys are always strings.
+- **`#inst` / `#uuid` tagged-literal handling in `from edn`**: `#inst "..."` now produces a Nushell `Date` (was: stringified Java Date through `:else`); `#uuid "..."` produces a Nushell `String` (Nushell has no UUID type — use the `^uuidv7` CLI for UUIDv7-aware operations).
+- **`:examples` populated** in both `from edn` and `to edn` Signatures (5 each, surfacing in `help from edn` / `help to edn`). Includes cross-tool composition examples with `^cedn` and `^uuidv7`.
+- **Ecosystem integration tests** (conditional): exercises `^cedn` and `^uuidv7` composition. Skipped silently when the CLIs aren't on PATH; runs 7 extra tests when they are. The tests caught the `#inst` bug above on first run — exactly the kind of cross-tool regression they're meant to detect.
+- README sections: `pprint-edn` Nushell `def` for ad-hoc pretty-printing, EDN-set conversion options, ecosystem composition examples.
+
+### Changed
+
+- `plugin-release` bumped to `0.112.2-2-SNAPSHOT` (post-v0.112.2-1 dev window).
+
 ## [0.112.2-1] — 2026-05-04 — `to edn --lines/--objects` + chained-pipeline fix
 
 First plugin-only patch on the `0.112.2` line. No Nushell anchor change; same Nushell-target as v0.112.2.

@@ -83,9 +83,10 @@ If this plugin gets traction and the bb startup cost or dependency becomes a rea
 - ListStream output (forms emitted as they're parsed in `from edn --lines`).
 
 ### `from edn`
-- All standard EDN shapes: maps, vectors, lists, sets (rendered as Nushell lists since Nushell has no set type), strings, ints, floats, booleans, nil, symbols (as strings), keywords, nested.
+- All standard EDN shapes: maps, vectors, lists, sets (default: rendered as Nushell lists; opt into `{k: k}` mirror records via `--set2record`), strings, ints, floats, booleans, nil, symbols (as strings), keywords, nested.
 - **Tagged literals**: `#inst "..."` becomes a Nushell `Date` (so downstream `format date`, comparisons, and date filters Just Work); `#uuid "..."` becomes a Nushell `String` (Nushell has no native UUID type — the `^uuidv7` CLI provides UUIDv7-aware operations on top).
 - **Keyword stringification**: leading colon dropped, namespace preserved (`:file` → `"file"`, `:foo/bar` → `"foo/bar"`). Implemented as `(subs (str v) 1)` — deliberately not `(name v)`, which would silently strip namespaces.
+- **`--set2record`** (opt-in): renders an EDN set as a Nushell record in mirror form (`{a: a, b: b, c: c}` for `#{:a :b :c}`). Pairs with `to edn --record2set` for round-trip. Loss-free for keyword/string sets only — Nushell record keys are strings, so int/composite-keyed sets degrade.
 - **Input shapes**: `Empty`, `Value` (literal string), `ByteStream` (piped external stdout). For single-form mode `ByteStream` is buffered to a string; for `--lines`/`--objects` it's consumed truly incrementally.
 - **Multi-form mode** via `--lines` (`-l`) or `--objects` (`-o`): parses every top-level form, emits each through a `ListStream`. Form boundaries come from the EDN reader — not newlines — so multi-line forms and `;` comments work transparently.
 - **`open file.edn`** auto-parses via the registered command; no explicit `from edn` needed.
