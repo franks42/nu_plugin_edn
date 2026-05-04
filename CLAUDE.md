@@ -71,6 +71,7 @@ If this plugin gets traction and the bb startup cost or dependency becomes a rea
 - `.github/workflows/` — three CI workflows: `test.yml` (matrix CI on push/PR), `nushell-drift.yml` (weekly compat watcher; opens PR on green, issue on red), `release.yml` (auto-builds asset and creates GitHub Release on `v*.*.*` tag push).
 - `bb-prototype-notes.md` — protocol-level findings: handshake gotchas, ByteStream input, ListStream input/output, incremental-streaming machinery, bb-proxy quirks. Living document — append to it as you learn.
 - `README.md` — user-facing docs, install instructions, `to edn` type-mappings table, CI badge.
+- `AGENTS.md` — terse agent-facing reference: interface tables, common patterns, numbered gotchas list, quoting tips. Written for LLMs running `nu` in a shell session — distinct audience from README's tutorial flow and CLAUDE.md's dev-plan focus.
 - `LICENSE` — MIT.
 - `CHANGELOG.md` — Keep-a-Changelog format, `[Unreleased]` section heading carries the SNAPSHOT version during dev windows.
 

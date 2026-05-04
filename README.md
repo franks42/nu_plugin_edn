@@ -405,6 +405,12 @@ If your pipeline goes `nu | to edn | ^cedn | sha256sum` (a content hash for sign
   durations, filesizes, and binaries fall back to primitives — lossy
   by design.
 
+## For AI assistants
+
+See [`AGENTS.md`](AGENTS.md) — terse reference covering the interface,
+common patterns, gotchas, and quoting tips, written for LLM agents
+running `nu` in a shell session.
+
 ## Development
 
 See `CLAUDE.md` for the development plan and `bb-prototype-notes.md`
