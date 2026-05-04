@@ -63,7 +63,7 @@
 (def nushell-target
   (or (System/getenv "NU_PLUGIN_EDN_NU_VERSION") "0.112.2"))
 
-(def plugin-release "0.112.2-1")
+(def plugin-release "0.112.2-2-SNAPSHOT")
 
 ;; Step 2: Hello exchange. We send first.
 (send-msg {:Hello {:protocol "nu-plugin"
@@ -102,6 +102,15 @@
       (float? v)      {:Float   {:val (double v) :span span}}
       (keyword? v)    {:String  {:val (subs (str v) 1) :span span}}
       (symbol? v)     {:String  {:val (str v) :span span}}
+      ;; #inst literal — clojure.edn parses #inst into java.util.Date by
+      ;; default; surface it as a Nushell Date so downstream pipelines
+      ;; can use date filters (`format date`, comparisons, etc.).
+      (instance? java.util.Date v)
+      {:Date {:val (.toString (.toInstant ^java.util.Date v)) :span span}}
+      ;; #uuid literal — Nushell has no UUID type; emit as a string so
+      ;; downstream `into uuid`/`is-uuid`/string-ops work normally.
+      (instance? java.util.UUID v)
+      {:String {:val (str v) :span span}}
       (map? v)        {:Record  {:val (into {} (for [[k vv] v]
                                                  [(if (keyword? k) (subs (str k) 1) (str k))
                                                   (->nu-value vv)]))
@@ -514,7 +523,22 @@
          :allow_variants_without_examples true
          :is_filter false :creates_scope false :allows_unknown_args false
          :category "Formats"}
-   :examples []})
+   :examples
+   [{:example     "'{:name \"alice\" :age 30}' | from edn"
+     :description "Parse a single EDN map into a Nushell record."
+     :result      nil}
+    {:example     "'[{:filename \"a.txt\" :size 100} {:filename \"b.txt\" :size 200}]' | from edn"
+     :description "Parse a vector of maps into a Nushell table."
+     :result      nil}
+    {:example     "'1 2 3 :four \"five\"' | from edn --lines"
+     :description "Parse multiple top-level forms; emit each as a separate value (ListStream)."
+     :result      nil}
+    {:example     "bb produce.clj | from edn --lines | where status == \"active\""
+     :description "Stream EDN forms from a babashka producer through the plugin and into Nushell pipeline ops."
+     :result      nil}
+    {:example     "^uuidv7 parse 0195a4c8-fae8-7c8d-b2a1-... | from edn | get datetime"
+     :description "Cross-tool: extract the embedded timestamp from a UUIDv7 via the uuidv7 CLI + from edn."
+     :result      nil}]})
 
 (def to-edn-sig
   {:sig {:name "to edn"
@@ -537,7 +561,22 @@
          :allow_variants_without_examples true
          :is_filter false :creates_scope false :allows_unknown_args false
          :category "Formats"}
-   :examples []})
+   :examples
+   [{:example     "{name: \"alice\" age: 30} | to edn"
+     :description "Emit a Nushell record as an EDN map with keyword keys."
+     :result      nil}
+    {:example     "[{n: 1} {n: 2} {n: 3}] | to edn"
+     :description "Emit a Nushell table as a vector of EDN maps."
+     :result      nil}
+    {:example     "[{n: 1} {n: 2}] | to edn --lines"
+     :description "Multi-form output: each list element on its own line."
+     :result      nil}
+    {:example     "{user: \"alice\" id: 42} | to edn | ^cedn | sha256sum"
+     :description "Cross-tool: produce a deterministic content hash via the cedn CLI."
+     :result      nil}
+    {:example     "{user: \"alice\"} | to edn | ^cedn | from edn"
+     :description "Cross-tool: canonicalize and round-trip a value through the cedn CLI."
+     :result      nil}]})
 
 (defn handle-from-edn [call-id run]
   (let [input  (:input run)

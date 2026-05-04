@@ -84,6 +84,7 @@ If this plugin gets traction and the bb startup cost or dependency becomes a rea
 
 ### `from edn`
 - All standard EDN shapes: maps, vectors, lists, sets (rendered as Nushell lists since Nushell has no set type), strings, ints, floats, booleans, nil, symbols (as strings), keywords, nested.
+- **Tagged literals**: `#inst "..."` becomes a Nushell `Date` (so downstream `format date`, comparisons, and date filters Just Work); `#uuid "..."` becomes a Nushell `String` (Nushell has no native UUID type — the `^uuidv7` CLI provides UUIDv7-aware operations on top).
 - **Keyword stringification**: leading colon dropped, namespace preserved (`:file` → `"file"`, `:foo/bar` → `"foo/bar"`). Implemented as `(subs (str v) 1)` — deliberately not `(name v)`, which would silently strip namespaces.
 - **Input shapes**: `Empty`, `Value` (literal string), `ByteStream` (piped external stdout). For single-form mode `ByteStream` is buffered to a string; for `--lines`/`--objects` it's consumed truly incrementally.
 - **Multi-form mode** via `--lines` (`-l`) or `--objects` (`-o`): parses every top-level form, emits each through a `ListStream`. Form boundaries come from the EDN reader — not newlines — so multi-line forms and `;` comments work transparently.
@@ -199,15 +200,17 @@ These bit during initial development and will bite again on every protocol-shape
 
 `bb test` runs the suite (`nu nu_plugin_edn.tests.nu` directly works too — bb is just the convenience entry point). The plugin must be registered first via `bb register`.
 
-What the suite covers today (47 cases passing on 0.112.2):
+What the suite covers today (63 unconditional + up-to-7 conditional ecosystem tests):
 
 - **`from edn` scalars**: int, float, bool, string, nil.
 - **`from edn` collections**: vector, map, list (sets are converted to lists, no separate test).
 - **`from edn` nested structures**, the cljsh use case (`[{:filename ... :size ... :type ...} ...]`).
+- **`from edn` tagged literals**: `#inst` → Nushell Date (verified via `describe`), `#uuid` → string.
 - **Keyword stringification**: colon dropped, namespace preserved.
 - **ByteStream input**: from `^echo`, from `bb -e`, large input (1000 records), `open` of a `.txt` file.
 - **Multi-form mode (`--lines`/`--objects`)**: scalar count, mixed shapes, alias equivalence, multi-line forms, comment stripping, streamed bb output, record extraction, `first N` short-circuit, large producer (5000 records) + `first N` correctness.
 - **`to edn`**: scalars (int, nil, string, empty record, empty list), simple record, list of records, nested, native-type fallbacks (filesize, duration, date), round-trips (simple, nested), end-to-end cljsh round-trip (bb → from edn → where → to edn → from edn).
+- **Ecosystem integration** (conditional): `^cedn` round-trip, canonicalization key-sort verification, byte-stability across runs; `^uuidv7 gen` shape, `^uuidv7 parse | from edn` record-shape; cross-tool `uuidv7 gen --format edn → from edn → to edn → ^cedn`. Skipped silently if the CLIs aren't on PATH (no `which cedn` / `which uuidv7`).
 
 Gaps (deliberately or as TODO):
 - **Error-case tests** — malformed EDN, missing closing brace, truncated input. The test file admits this gap in a comment. Add when error reporting (section 4) gets source spans.
@@ -304,8 +307,8 @@ Most "do something with EDN" needs are better satisfied as **bb-script filters l
 ### Filters that should ship from their library repos
 
 - ✅ **`cedn`** — canonical EDN filter shipped from the [canonical-edn](https://github.com/franks42/canonical-edn) repo. Single bb script (`bin/cedn`) wrapping the cedn library, with `--input`/`--output`/`--edn`/`--objects`/`--help`/`--version` flags. Streams form-by-form, EPIPE-clean, dev-mode uses local source / release-mode pulls cedn from Clojars via `add-deps`. Released as a versioned asset on GitHub Releases. Use cases: `data | to edn | ^cedn | sha256sum` (content hash), `data | to edn | ^cedn | from edn` (canonical round-trip via Nushell), `cat config.edn | ^cedn` (normalize whitespace). The pattern (single bb script in the reference library's repo, GH-Released alongside the library) is the template for the next two.
-- ⏳ **`uuidv7`** — UUIDv7 generator/parser CLI, would ship from [uuidv7.cljc](../uuidv7.cljc). Suggested subcommands: `uuidv7 gen` (generate), `uuidv7 parse <id>` (extract `{timestamp ...}` as EDN), `uuidv7 from-ts <ts>` (synthesize from a given timestamp). Replaces what would otherwise be a `nu_plugin_uuidv7` — Nushell calls `^uuidv7 gen` like any external command, and `^uuidv7 parse $id | from edn` rehydrates a structured record.
-- ⏳ **`pprint-edn`** — bb filter wrapping `clojure.pprint`. Could live in its own tiny repo or as a scripts-collection.
+- ✅ **`uuidv7`** — UUIDv7 generator/parser/validator CLI shipped from [uuidv7.cljc](https://github.com/franks42/uuidv7.cljc). Three subcommands: `gen` (generate), `parse` (extract `{:uuid :uri :datetime :counter}` as EDN), `valid` (predicate, exit 0/1). Three output formats per emit (uuid / urn / edn). Same single-bb-script + dev-vs-release-source-resolution pattern as `cedn`. Composes via `^uuidv7 parse $id | from edn | get datetime`. Released as `uuidv7-vX.Y.Z` on GitHub Releases.
+- ⏳ **`pprint-edn`** — bb filter wrapping `clojure.pprint`. ~30-line script: `slurp *in*` → `clojure.edn/read-string` → `clojure.pprint/pprint` → stdout. Useful for human-readable inspection of EDN streams in the same way `jq` is for JSON. Could live in its own tiny repo, or — given how minimal it is — as a documented one-liner alias in user docs. The `^cedn` / `^uuidv7` pattern (Maven dep on a library) doesn't really fit since there's nothing to library-ize; clojure.pprint is already in bb's stdlib.
 - ⏳ **Signet CLIs** — `signet-keygen`, `signet-sign`, `signet-verify`, etc., from the [signet](https://github.com/franks42/cljc-25519) repo (the cljc-25519 / signet library). Composable with `to edn | ^cedn` as the canonical-bytes producer.
 
 ### Plugins that genuinely need to be plugins

@@ -63,6 +63,15 @@ check "cljsh: filter+sort" (
 check "keyword drops colon"        ('{:k :file}' | from edn | get k) "file"
 check "namespaced keyword keeps ns" ('{:k :foo/bar}' | from edn | get k) "foo/bar"
 
+# Tagged literals: #inst -> Nushell Date, #uuid -> Nushell string.
+check "from edn: #inst becomes a Date" (
+    '{:at #inst "2024-01-15T10:30:00Z"}' | from edn | get at | describe
+) "datetime"
+
+check "from edn: #uuid becomes a string" (
+    '{:id #uuid "550e8400-e29b-41d4-a716-446655440000"}' | from edn | get id
+) "550e8400-e29b-41d4-a716-446655440000"
+
 # --- ByteStream input (piped from external commands) ---
 # These exercise the stream code path: Nushell delivers external command
 # stdout as a ByteStream, not a String Value, and the plugin must consume
@@ -287,6 +296,76 @@ check "to edn --lines: bb-streamed round-trip via chained plugin Calls" (
 # Note: the prototype emits :Error with msg but no source span. These
 # tests just verify that malformed input produces an error rather than
 # a successful but wrong parse.
+
+# --- Ecosystem integration ---
+# Tests that exercise composition with adjacent CLI tools from the
+# wider Clojure-shaped Nushell ecosystem (cedn, uuidv7). They run
+# conditionally — if the external CLI isn't on PATH, the test is
+# skipped silently rather than failing. Install the missing tool
+# from its GitHub Release if you want full coverage:
+#   - cedn:   github.com/franks42/canonical-edn/releases
+#   - uuidv7: github.com/franks42/uuidv7.cljc/releases
+
+let has_cedn = (which cedn | is-not-empty)
+let has_uuidv7 = (which uuidv7 | is-not-empty)
+
+if not $has_cedn {
+    print "SKIP cedn integration tests (cedn not on PATH — install from canonical-edn GH Releases)"
+}
+if not $has_uuidv7 {
+    print "SKIP uuidv7 integration tests (uuidv7 not on PATH — install from uuidv7.cljc GH Releases)"
+}
+
+# --- cedn integration ---
+# `to edn | ^cedn | from edn` round-trips a value through the
+# canonical-EDN filter and back into Nushell typed values.
+
+if $has_cedn {
+    check "ecosystem: to edn | ^cedn | from edn round-trip" (
+        {b: 2, a: 1, list: [3 1 2]} | to edn | ^cedn | from edn
+    ) {a: 1, b: 2, list: [3 1 2]}
+
+    check "ecosystem: cedn canonicalizes — different key orders produce identical bytes" (
+        ({b: 2, a: 1} | to edn | ^cedn) == ({a: 1, b: 2} | to edn | ^cedn)
+    ) true
+
+    check "ecosystem: cedn output is byte-stable across runs" (
+        ({user: "alice"} | to edn | ^cedn) == ({user: "alice"} | to edn | ^cedn)
+    ) true
+}
+
+# --- uuidv7 integration ---
+# Generate and parse UUIDv7s through the uuidv7 CLI; round-trip
+# through `from edn` to confirm the EDN output of `uuidv7 parse`
+# is structurally consumable by the plugin.
+
+if $has_uuidv7 {
+    check "ecosystem: ^uuidv7 gen produces a 36-char UUID string" (
+        ^uuidv7 gen | str trim | str length
+    ) 36
+
+    let uuid_str = (^uuidv7 gen | str trim)
+    let parsed = (^uuidv7 parse $uuid_str | from edn)
+
+    check "ecosystem: ^uuidv7 parse | from edn produces datetime as a Date" (
+        $parsed | get datetime | describe
+    ) "datetime"
+
+    check "ecosystem: ^uuidv7 parse | from edn produces a record with the four expected keys" (
+        $parsed | columns | sort
+    ) [counter datetime uri uuid]
+}
+
+# --- Cross-tool composition (both CLIs together) ---
+# Headline ecosystem story: uuidv7 → from edn → manipulate → to edn → cedn.
+
+if ($has_cedn and $has_uuidv7) {
+    let parsed = (^uuidv7 gen --format edn | from edn)
+    let canonical = ($parsed | to edn | ^cedn)
+    check "ecosystem: uuidv7 → from edn → to edn → ^cedn produces canonical bytes containing :uuid" (
+        $canonical | str contains ":uuid"
+    ) true
+}
 
 # --- summary ---
 let failed = ($env.FAILED? | default 0)
