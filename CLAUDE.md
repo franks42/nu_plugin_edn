@@ -111,7 +111,7 @@ In rough priority order:
 
 Resolved: drop the leading colon by default, preserve namespace. `:file` → `"file"`, `:foo/bar` → `"foo/bar"`. Implemented as `(subs (str v) 1)` — `(name v)` would silently strip namespaces, which is wrong.
 
-Tradeoff accepted: round-trip fidelity is lost (a Nushell `"file"` could have started life as either an EDN string or an EDN keyword). The opt-in fidelity escape hatch — a `--keep-keyword-prefix` flag on both `from edn` and `to edn` — is on the roadmap; see section 2 (Planned flags).
+Tradeoff accepted: round-trip fidelity is lost in the default mode (a Nushell `"file"` could have started life as either an EDN string or an EDN keyword). The opt-in fidelity escape hatch shipped as the paired `--keep-keyword-prefix` flag on both `from edn` and `to edn`: keywords carry their `:` as a marker through the Nushell value (`:foo` → `":foo"`), and emit back as keywords. One-way fidelity loss documented: plain strings starting with `:` will coerce to keywords on the to-edn side.
 
 ### 2. `to edn` (reverse direction) — DONE (basic)
 
@@ -125,11 +125,13 @@ Type fallback policy chosen for Nushell-native types without an EDN equivalent:
 
 Lossy by design — round-tripping these specific types isn't supported and isn't planned. A user who needs them can wrap manually before `to edn`.
 
-Planned flags (only those that need plugin-side typed-value access — see "Plugin scope" below for the boundary principle):
-- `--meta <record>` — prefix the emitted top-level form with Clojure-reader-style metadata: `{a: 1} | to edn --meta {source: "nu", at: (date now)}` emits `^{:source "nu" :at #inst "..."} {:a 1}`. Useful for attaching provenance/context that a bb script on the receiving end can pick up via `(meta v)`. **Caveat**: `^{...}` is Clojure-reader syntax, not in the EDN spec proper — non-Clojure EDN parsers (Python, JS, Go) will reject it. Document this loudly. For pipelines that may reach non-Clojure consumers, the portable alternative is to wrap manually: `{context: {...} data: $val} | to edn`. We're not adding a separate `--wrap` flag for that — the wrap pattern is one line of Nushell, no plugin help needed.
-- `--keep-keyword-prefix` — opt-in keyword-fidelity emission, the inverse of the `from edn` flag of the same name. When set, strings that round-trip from EDN keywords (currently a string with no leading colon, no spaces) get re-emitted as keywords. Probably needs a heuristic on the producer side (e.g. only known field names) since pure strings and ex-keywords are indistinguishable in Nushell.
-- `--string-keys` — emit `{"name" "alice"}` instead of `{:name "alice"}`. For pipelines feeding non-Clojure EDN parsers that don't like keyword keys.
-- `--lines` / `--objects` — emit each list element as its own top-level form. **Shipped in 0.112.2-SNAPSHOT.** See CHANGELOG.
+Shipped flags (all those needing plugin-side typed-value access — see "Plugin scope" below for the boundary principle):
+- `--lines` / `--objects` — emit each list element as its own top-level form. Shipped in v0.112.2-1.
+- `--pprint` — pretty-print via `clojure.pprint`. Mutually exclusive with `--lines`/`--objects`.
+- `--record2set` (paired with `from edn --set2record`) — emit a mirror-form record (`{k: k}`) as an EDN set. Round-trip pair for keyword/string sets.
+- `--keep-keyword-prefix` (paired with `from edn --keep-keyword-prefix`) — keep the leading `:` as a marker through Nushell strings; re-emit `:`-prefixed strings as keywords. One-way fidelity loss: plain strings starting with `:` coerce to keywords on the emit side.
+- `--string-keys` — emit record keys as EDN strings (`{"name" ...}`) instead of keywords (`{:name ...}`). For pipelines feeding Python/JS/Go EDN parsers. Combines with `--keep-keyword-prefix`: `--string-keys` wins for keys; `--keep-keyword-prefix`'s value-side effect is independent.
+- `--meta <record>` — prefix the emitted top-level form with Clojure-reader-style metadata: `{a: 1} | to edn --meta {source: "nu"}` emits `^{:source "nu"} {:a 1}`. A bb consumer reads it back via `(meta v)`. **Non-portable**: `^{...}` is Clojure-reader syntax, not EDN spec — Python/JS/Go EDN parsers will reject it. For consumers that may not be Clojure, the portable alternative is to wrap manually: `{context: {...} data: $val} | to edn`. Mutually exclusive with `--lines`/`--objects`; rejects non-record arguments.
 
 ### Why `--pretty` and `--canonical` are NOT in the plugin
 
@@ -215,7 +217,7 @@ Gaps (deliberately or as TODO):
 - **Error-case tests** — malformed EDN, missing closing brace, truncated input. Five cases live in the test file: error happens, useful message, source-span label present (Value input), no label for ByteStream input, label present in `--lines` mode. Exact span offsets aren't asserted (they shift with surrounding script bytes).
 - **Megabyte-scale streaming tests** — current largest is 5000 records (~30 KB).
 - **Unbounded producer + `first N`** — works correctness-wise, but bb itself doesn't die on EPIPE so the test would leak processes; needs a non-bb producer (`yes`, `tail -f`) to be reliable.
-- **Per-flag tests** for the planned `to edn` flags (`--meta`, `--keep-keyword-prefix`, `--string-keys`) — add as each lands. (`--pretty` and `--canonical` were dropped from the plugin per the typed-value boundary principle; their tests live with whichever filter implements them.)
+- **Per-flag tests for shipped `to edn` flags** are present (`--lines`/`--objects`/`--pprint`/`--record2set`/`--keep-keyword-prefix`/`--string-keys`/`--meta`). (`--pretty` and `--canonical` were dropped from the plugin per the typed-value boundary principle; their tests live with whichever filter implements them.)
 
 A test fails if its expected output doesn't match. Don't catch and ignore errors in tests — let them fail loud.
 
