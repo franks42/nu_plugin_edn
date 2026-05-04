@@ -437,6 +437,40 @@ check "to edn --string-keys --keep-keyword-prefix: keys string, values still key
     {":a": ":foo"} | to edn --string-keys --keep-keyword-prefix
 ) '{":a" :foo}'
 
+# --- --meta ---
+# Prefix the emitted top-level form with Clojure reader metadata.
+# Non-portable to non-Clojure EDN parsers; useful for bb consumers
+# that read the metadata via `(meta v)`.
+
+check "to edn --meta: prefixes with ^{...}" (
+    {a: 1} | to edn --meta {source: "nu"}
+) '^{:source "nu"} {:a 1}'
+
+check "to edn --meta: works with multi-key meta record" (
+    {a: 1, b: 2} | to edn --meta {source: "nu", version: "1.0"}
+) '^{:source "nu", :version "1.0"} {:a 1, :b 2}'
+
+check "to edn --meta: error when combined with --lines" (
+    try {
+        [1 2] | to edn --meta {x: 1} --lines
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
+check "to edn --meta: error when combined with --objects" (
+    try {
+        [1 2] | to edn --meta {x: 1} --objects
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
+check "to edn --meta: error when arg is not a record" (
+    try {
+        {a: 1} | to edn --meta "not a record"
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
 # --- error cases ---
 # Parse errors carry a source-span label pointing at the offending
 # location in the user's script (Value input only — ByteStream input

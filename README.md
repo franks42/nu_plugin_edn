@@ -194,10 +194,13 @@ By default, EDN sets become Nushell lists (Nushell has no native set type). Opt 
   memory before parsing. Fine for configs; for log-sized single
   documents, prefer multi-form mode (`--lines`) which is fully
   incremental.
-- **Keyword round-trip**: `from edn` strips the leading colon
-  (`:file` → `"file"`, namespaces preserved); `to edn` emits all
-  string-shaped fields as plain strings. A `--keep-keyword-prefix`
-  flag pair is planned to opt into fidelity.
+- **Keyword round-trip**: by default, `from edn` strips the leading colon
+  (`:file` → `"file"`, namespaces preserved) and `to edn` emits all
+  string-shaped fields as plain strings. Opt into fidelity via the
+  paired `--keep-keyword-prefix` flag on both sides — keywords carry
+  their `:` as a marker through the Nushell value (`:foo` → `":foo"`),
+  and emit back as keywords. Caveat: with the flag, plain strings
+  starting with `:` will coerce to keywords on the to-edn side.
 - **`to edn` types**: see the type-mappings table above. Nushell
   durations, filesizes, and binaries fall back to primitives — lossy
   by design.

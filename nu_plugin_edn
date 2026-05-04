@@ -485,6 +485,12 @@
 (defn flag-set? [named flag-name]
   (some (fn [[k _v]] (= (:item k) flag-name)) named))
 
+;; Fetch a flag's typed-value argument by name. Returns the Nushell
+;; Value record (e.g. {:Record {:val ... :span ...}}) or nil if the
+;; flag wasn't passed or was passed as a switch with no value.
+(defn flag-value [named flag-name]
+  (some (fn [[k v]] (when (= (:item k) flag-name) v)) named))
+
 ;; Emit a sequence of values as a ListStream response. Each value goes
 ;; out as {:Data [id {:List <nu-value>}]}, terminated by {:End id}.
 ;;
@@ -769,6 +775,9 @@
                   :var_id nil :default_value nil}
                  {:long "string-keys" :short nil :arg nil :required false
                   :desc "Emit record keys as EDN strings ({\"name\" \"alice\"}) instead of keywords ({:name \"alice\"}). For pipelines feeding non-Clojure EDN consumers (Python/JS/Go) that don't speak keyword keys."
+                  :var_id nil :default_value nil}
+                 {:long "meta" :short nil :arg "Any" :required false
+                  :desc "Prefix the emitted top-level form with a Clojure-reader-style metadata map (^{...} <form>). Useful for attaching provenance/context that a bb consumer reads via (meta v). NON-PORTABLE: ^{...} is Clojure-reader syntax, not part of the EDN spec — Python/JS/Go EDN parsers will reject it. Mutually exclusive with --lines/--objects."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -871,17 +880,28 @@
   ;; Content transformation is independent of layout: --record2set
   ;; converts mirror-form records to EDN sets at any nesting depth,
   ;; and combines freely with any of the layout flags above.
-  (let [input   (:input run)
-        named   (get-in run [:call :named])
-        lines?  (flag-set? named "lines")
-        objs?   (flag-set? named "objects")
-        pprint? (flag-set? named "pprint")
-        multi?  (or lines? objs?)]
+  (let [input    (:input run)
+        named    (get-in run [:call :named])
+        lines?   (flag-set? named "lines")
+        objs?    (flag-set? named "objects")
+        pprint?  (flag-set? named "pprint")
+        meta-val (flag-value named "meta")
+        multi?   (or lines? objs?)]
     (cond
       (and pprint? multi?)
       (send-error-response
        call-id
        "--pprint cannot be combined with --lines or --objects")
+
+      (and meta-val multi?)
+      (send-error-response
+       call-id
+       "--meta cannot be combined with --lines or --objects")
+
+      (and meta-val (not (and (map? meta-val) (contains? meta-val :Record))))
+      (send-error-response
+       call-id
+       "--meta requires a record value")
 
       (and (map? input) (contains? input :ByteStream))
       (send-error-response
@@ -921,9 +941,15 @@
                           :else
                           ;; Single-form mode preserves the original
                           ;; behaviour: Empty -> "nil", anything else
-                          ;; -> serialized form of the value.
-                          (emit-clj (when-let [v (first items)] (nu->clj v))
-                                    pprint?))
+                          ;; -> serialized form of the value. With
+                          ;; --meta, prefix `^<meta-edn> ` (Clojure
+                          ;; reader metadata syntax — non-portable to
+                          ;; non-Clojure EDN parsers).
+                          (let [body (emit-clj (when-let [v (first items)] (nu->clj v))
+                                               pprint?)]
+                            (if meta-val
+                              (str "^" (pr-str (nu->clj meta-val)) " " body)
+                              body)))
                 span {:start 0 :end 0}]
             (send-msg {:CallResponse
                        [call-id
