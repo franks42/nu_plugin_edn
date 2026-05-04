@@ -10,7 +10,11 @@ once a 1.0 ships.
 
 (Active dev cycle. Drop the `-SNAPSHOT` suffix on `plugin-release` before tagging the next release.)
 
-### Added (post-v0.112.2-1)
+## [0.112.2-2] — 2026-05-04 — flag-pair completion + spans + drift fix
+
+Second plugin-only patch on the `0.112.2` line. Substantial dev window: keyword-fidelity round-trip, string keys for non-Clojure consumers, Clojure reader metadata, source-span error labels, mid-stream error surfacing, and a fix for the long-broken nushell-drift watcher.
+
+### Added
 
 - **Mid-stream parse errors in `from edn --lines` over a ByteStream now surface inline.** Previously a parse failure mid-stream was logged to stderr and the stream was silently truncated (the protocol can't switch a ListStream response into an Error response mid-flight). The plugin now emits a `Value::Error` as the final list element instead — downstream sees the error as either a top-level error or via `try/catch`. ShellError serializes as LabeledError, so the `:error` map matches our top-level error shape.
 - **`from edn --keep-keyword-prefix`** + **`to edn --keep-keyword-prefix`** — paired flags for keyword/string round-trip fidelity. From-side keeps the leading `:` as a marker on the Nushell string (`:foo` → `":foo"`); to-side re-emits strings matching the keyword shape as EDN keywords. One-way fidelity loss documented: plain strings starting with `:` will coerce to keywords on the to-edn side.
@@ -24,9 +28,9 @@ once a 1.0 ships.
 - **Ecosystem integration tests** (conditional): exercises `^cedn` and `^uuidv7` composition. Skipped silently when the CLIs aren't on PATH; runs 7 extra tests when they are. The tests caught the `#inst` bug above on first run — exactly the kind of cross-tool regression they're meant to detect.
 - README sections: `pprint-edn` Nushell `def` for ad-hoc pretty-printing, EDN-set conversion options, ecosystem composition examples.
 
-### Changed
+### Fixed
 
-- `plugin-release` bumped to `0.112.2-2-SNAPSHOT` (post-v0.112.2-1 dev window).
+- **`nushell-drift` workflow**: had been silently failing to parse since the workflow first landed. Two distinct bugs: (1) multi-line bash strings inside `run: |` blocks were dedented to column 1, terminating the YAML literal block scalar early — fixed by indenting continuation lines to the block-indent level. (2) The `CURRENT` version-extraction regex assumed a single-line `(def nushell-target ...)` but ours spans two lines, so extraction returned empty and drift was falsely detected on every run. Replaced with `awk -F'"' '/NU_PLUGIN_EDN_NU_VERSION/ {print $4; exit}'`. Manually verified via `workflow_dispatch` after the fix.
 
 ## [0.112.2-1] — 2026-05-04 — `to edn --lines/--objects` + chained-pipeline fix
 
