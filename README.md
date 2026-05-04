@@ -21,14 +21,13 @@ Clojure-shaped pipelines.
 
 ## Status
 
-Both directions work. `from edn` is feature-complete (single-form, multi-
-form `--lines`/`--objects`, true incremental streaming over piped
-producers). `to edn` is shipped with the basic shape — keyword-keyed
-records, vectors, scalar fallbacks for Nushell-native types — and a
-handful of planned flags (`--pretty`, `--meta`, `--lines`, `--keep-
-keyword-prefix`, `--string-keys`) on the roadmap. See `CLAUDE.md` for
-the development plan and `bb-prototype-notes.md` for protocol-level
-notes.
+`v0.112.2-2` ships both directions feature-rich:
+
+- **`from edn`** — single-form, multi-form (`--lines`/`--objects`, fully streaming over piped producers), `#inst` / `#uuid` tagged literals, `--set2record`, `--keep-keyword-prefix`, source-span error labels, mid-stream error surfacing.
+- **`to edn`** — records, lists/tables, scalars, type fallbacks for Nushell-native types without an EDN equivalent (Duration, Filesize, Binary), `--lines`/`--objects`, `--pprint`, `--record2set`, `--keep-keyword-prefix`, `--string-keys`, `--meta`.
+
+See `CLAUDE.md` for the development plan and `bb-prototype-notes.md` for
+protocol-level notes.
 
 ## Versioning
 
@@ -40,18 +39,30 @@ can still grab a working build. Plugin-only bug fixes between Nushell
 minors (when they happen) get a `-N` patch suffix
 (`0.112.2-1`, `0.112.2-2`, ...).
 
-## Requirements
+## Setup
 
-- Nushell version matching the plugin version exactly — the protocol
-  does a strict equality check at registration. Mismatches fail with
-  `Plugin compiled for nushell version X, which is not compatible with version Y`.
-- [Babashka](https://babashka.org/) — `bb` on PATH.
+### 1. Install Nushell
 
-## Install
+If you don't already have it, follow [the Nushell install guide](https://www.nushell.sh/install/)
+(Homebrew, winget, cargo, scoop, distro packages — pick one). Confirm with `nu --version`. The plugin
+is anchored to a specific Nushell version (see [Versioning](#versioning)) — note your version, you'll
+match the plugin to it in step 3.
+
+### 2. Install Babashka
+
+The plugin runtime is a babashka script — `bb` must be on PATH. Follow
+[the Babashka install guide](https://github.com/babashka/babashka#installation) (Homebrew, scoop,
+the install script, etc.). Confirm with `bb --version`.
+
+You'll likely want bb anyway: it's what you run on the other side of the pipe — a Clojure REPL that
+starts in 30ms, perfect for shell scripts.
+
+### 3. Install nu_plugin_edn
+
+Pick the release matching your Nushell version. Plugin **0.112.2-2** pairs with Nushell **0.112.2**:
 
 ```bash
-# Pick the release matching your Nushell version. Example: Nushell 0.112.2
-curl -L https://github.com/franks42/nu_plugin_edn/releases/download/v0.112.2/nu_plugin_edn-v0.112.2 -o nu_plugin_edn
+curl -L https://github.com/franks42/nu_plugin_edn/releases/download/v0.112.2-2/nu_plugin_edn-v0.112.2-2 -o nu_plugin_edn
 chmod +x nu_plugin_edn
 
 # Register with Nushell
@@ -63,44 +74,130 @@ To load on every Nushell start, add to your `config.nu`:
 plugin use edn
 ```
 
-The latest release is at <https://github.com/franks42/nu_plugin_edn/releases/latest>.
+Browse all releases at <https://github.com/franks42/nu_plugin_edn/releases>. The plugin version
+must match the running Nushell version exactly — the protocol enforces strict equality at
+registration. Mismatches fail with `Plugin compiled for nushell version X, which is not
+compatible with version Y`.
 
-## Use
+### What you just gained
+
+After registering, Nushell has two new pipeline commands:
+
+- **`from edn`** — parse EDN bytes or text into Nushell typed values (records, tables, dates, …).
+- **`to edn`** — emit Nushell typed values as EDN bytes/text.
+
+Plus an automatic hook: `open config.edn` parses `.edn` files via the registered command, no
+explicit `from edn` needed.
+
+## Tutorial
+
+### Parse and emit (the basics)
 
 ```nu
 # Parse a single EDN value
 '{:name "alice" :age 30}' | from edn
 # => {name: alice, age: 30}
 
-# Parse a vector of maps (renders as a Nushell table)
+# Parse a vector of maps — renders as a Nushell table
 '[{:filename "a.txt" :size 100} {:filename "b.txt" :size 200}]' | from edn
+# ╭───┬──────────┬──────╮
+# │ # │ filename │ size │
+# ├───┼──────────┼──────┤
+# │ 0 │ a.txt    │  100 │
+# │ 1 │ b.txt    │  200 │
+# ╰───┴──────────┴──────╯
 
-# Compose with native Nushell pipeline ops
-'[{:filename "a.txt" :size 100} {:filename "b.txt" :size 200} {:filename "c.txt" :size 300}]'
-  | from edn
-  | where size > 150
-  | sort-by size --reverse
-
-# Pipe babashka script output through the plugin (no extra glue needed)
-bb my-producer.clj | from edn | where status == "active" | length
-
-# `open` of a .edn file auto-parses via the registered command
-open config.edn | get :database
-
-# Multi-form input: parse a sequence of top-level EDN forms.
-# Each `(prn ...)` in the producer becomes one row; `first N` short-circuits.
-bb -e '(doseq [event (events)] (prn event))' | from edn --lines | first 10
-
-# `to edn` — emit Nushell values as EDN text
+# Emit a Nushell record/table as EDN
 {name: "alice" age: 30} | to edn
 # => {:name "alice", :age 30}
 
 [{n: 1} {n: 2} {n: 3}] | to edn
 # => [{:n 1} {:n 2} {:n 3}]
-
-# End-to-end round-trip through bb on both sides
-bb produce.clj | from edn | where size > 1000 | sort-by size | to edn | bb consume.clj
 ```
+
+### Compose with native Nushell pipeline ops
+
+Once parsed, EDN values flow through Nushell's filters/transforms like any structured data:
+
+```nu
+'[{:filename "a.txt" :size 100} {:filename "b.txt" :size 200} {:filename "c.txt" :size 300}]'
+| from edn
+| where size > 150
+| sort-by size --reverse
+# ╭───┬──────────┬──────╮
+# │ # │ filename │ size │
+# ├───┼──────────┼──────┤
+# │ 0 │ c.txt    │  300 │
+# │ 1 │ b.txt    │  200 │
+# ╰───┴──────────┴──────╯
+
+# `open` of a .edn file auto-parses via the registered command
+open config.edn | get :database
+```
+
+### bb scripts as **producers** (bb → nu)
+
+Anywhere a bb script writes EDN to stdout, `from edn` consumes it as typed values:
+
+```nu
+# Single form per stdout: bb prints one EDN value, plugin parses it
+^bb -e '(prn {:host "prod" :latency-ms 42})' | from edn | get latency-ms
+# => 42
+
+# Multi-form: every (prn ...) becomes one row; `first N` short-circuits the producer
+^bb -e '(doseq [event (events)] (prn event))' | from edn --lines | first 10
+
+# Real-world: filter a stream of records by some structural condition
+^bb -e '(doseq [r (read-log)] (prn r))'
+| from edn --lines
+| where status == "active"
+| where latency-ms > 100
+| length
+```
+
+`from edn --lines` over a piped producer is **fully incremental**: bytes are pulled on demand,
+forms parsed and emitted one at a time, and a downstream `first N` triggers a `:Drop` that tells
+the producer to stop. Works with unbounded sources (`tail -f`, infinite generators).
+
+### bb scripts as **consumers** (nu → bb)
+
+`to edn` emits Nushell values as EDN bytes that any bb script can read:
+
+```nu
+# Pipe a Nushell record into a bb script that consumes EDN from stdin
+{user: "alice" roles: [admin reviewer]} | to edn | ^bb -e '
+    (let [v (clojure.edn/read-string (slurp *in*))]
+      (println "user:" (:user v))
+      (println "is admin?:" (boolean (some #{"admin"} (:roles v)))))'
+# user: alice
+# is admin?: true
+
+# Multi-form output: each list element becomes its own top-level form
+[{n: 1} {n: 2} {n: 3}] | to edn --lines | ^bb -e '
+    (require (quote [clojure.edn :as edn]))
+    (doseq [line (line-seq (java.io.BufferedReader. *in*))]
+      (println "got:" (edn/read-string line)))'
+# got: {:n 1}
+# got: {:n 2}
+# got: {:n 3}
+```
+
+### Round-trip: bb → nu → bb
+
+The full pattern — bb scripts on both ends, Nushell as the middleware:
+
+```nu
+^bb produce.clj
+| from edn
+| where size > 1000
+| sort-by size
+| to edn
+| ^bb consume.clj
+```
+
+Structured data flows end-to-end without any text-parsing intermediaries. No bash escaping, no
+`jq`, no JSON-shaped impedance mismatch with Clojure data (sets, keywords, namespaced keys,
+tagged literals all preserve through the pipe).
 
 ### Pretty-printing EDN
 
@@ -130,23 +227,101 @@ cat config.edn | pprint-edn
 is in bb's stdlib, so a Nushell custom command is enough; no separate library
 to wrap.)
 
-### Composing with the wider Clojure-shaped Nushell ecosystem
+### bb scripts as **filters** (`^app` pattern) — the wider Clojure-shaped Nushell ecosystem
 
-[`cedn`](https://github.com/franks42/canonical-edn) (canonical-EDN filter) and
-[`uuidv7`](https://github.com/franks42/uuidv7.cljc) (UUIDv7 generator/parser/
-validator) are sibling tools — single bb-script CLIs released alongside their
-reference libraries. They compose with `nu_plugin_edn` via Unix pipes:
+Some EDN-related operations are pure text-on-text transformations — they don't need access to
+Nushell typed values. Per the [typed-value boundary principle](CLAUDE.md), those live in
+**standalone bb-script CLIs** in their reference library's repo and compose via Unix pipes.
+
+Two are released today:
+
+#### `^cedn` — canonical EDN (byte-stable serialization)
+
+[github.com/franks42/canonical-edn](https://github.com/franks42/canonical-edn)
+
+Reads EDN, emits the same value with sorted keys + normalized whitespace + canonical token forms.
+Output is byte-stable across runs and process boundaries — suitable for hashing, signing, content
+addressing.
 
 ```nu
-# Hash a structured payload's canonical form
-{user: "alice" scope: read} | to edn | ^cedn | sha256sum
+# Hash a structured payload's canonical form (different key orders → same bytes → same hash)
+{b: 2, a: 1} | to edn | ^cedn | sha256sum
+{a: 1, b: 2} | to edn | ^cedn | sha256sum
+# both produce the same digest
 
-# Pull a UUIDv7's embedded timestamp into Nushell
-^uuidv7 parse "0195a4c8-fae8-7c8d-b2a1-..." | from edn | get datetime
+# Round-trip a Nushell value through canonical EDN
+{b: 2, a: 1} | to edn | ^cedn | from edn
+# => {a: 1, b: 2}    (key order normalized)
 
-# Round-trip via canonical EDN
-{b: 2 a: 1} | to edn | ^cedn | from edn   # => {a: 1, b: 2}
+# Normalize whitespace in an existing .edn file
+cat config.edn | ^cedn
+
+# Diff two structurally-equivalent EDN files reliably
+diff (^cedn -i a.edn) (^cedn -i b.edn)
 ```
+
+#### `^uuidv7` — RFC 9562 UUIDv7 generator/parser/validator
+
+[github.com/franks42/uuidv7.cljc](https://github.com/franks42/uuidv7.cljc)
+
+Generate time-ordered UUIDs, parse them into structured fields, validate.
+
+```nu
+# Generate one
+^uuidv7 gen
+# 0195a4c8-fae8-7c8d-b2a1-3f7e92a4d8b1
+
+# Generate, attach to a record, emit as EDN
+{event: "login", id: (^uuidv7 gen | str trim)} | to edn
+# => {:event "login", :id "0195a4c8-..."}
+
+# Parse a UUIDv7 — output is EDN, plugin parses into a Nushell record
+^uuidv7 parse "0195a4c8-fae8-7c8d-b2a1-3f7e92a4d8b1" | from edn
+# ╭──────────┬──────────────────────────────────────╮
+# │ uuid     │ 0195a4c8-fae8-7c8d-b2a1-3f7e92a4d8b1 │
+# │ uri      │ urn:uuid:0195a4c8-...                │
+# │ datetime │ 2026-05-04 10:23:45.831 +00:00       │
+# │ counter  │ [3197 17246 1834...]                 │
+# ╰──────────┴──────────────────────────────────────╯
+
+# Pull just the embedded timestamp
+^uuidv7 parse $my-id | from edn | get datetime
+
+# Validate a UUIDv7 (exit 0 if valid v7, 1 otherwise)
+^uuidv7 valid $maybe-id
+```
+
+#### Composing all three
+
+Each tool is independently useful, but they shine when chained:
+
+```nu
+# Cross-tool: generate a UUIDv7, parse it, attach context, hash the canonical form
+^uuidv7 gen --format edn      # bb tool emits EDN: {:uuid #uuid "..." :datetime #inst "..." ...}
+| from edn                    # plugin: EDN bytes → Nushell record (typed)
+| insert source "ingest-svc"  # nushell native: add a field
+| to edn                      # plugin: typed → EDN bytes
+| ^cedn                       # bb tool: canonicalize
+| sha256sum                   # standard Unix: hash
+
+# Filter a bb stream, sort, sign with attached context
+^bb produce-events.clj
+| from edn --lines
+| where status == "active"
+| sort-by timestamp
+| each { |row| {data: $row, signed-at: (date now)} }
+| to edn --lines
+| ^cedn -o
+| ^bb sign-each-line.clj
+```
+
+The pattern: **typed transformations happen inside Nushell** (`where`, `sort-by`, `each`, `insert`,
+`update`, etc.) on the typed side of `from edn` / `to edn`; **byte-level transformations happen in
+external CLIs** (`^cedn` for canonicalization, `^uuidv7` for ID generation, future tools for signing
+/ hashing / encryption) on the EDN-bytes side.
+
+`nu_plugin_edn` is the only piece that needs to be a Nushell plugin — everything else is a regular
+external command piped through `^name` syntax.
 
 
 ## Type mappings (`to edn`)
