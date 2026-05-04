@@ -6,21 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once a 1.0 ships.
 
-## [Unreleased] — `0.112.2-SNAPSHOT`
+## [Unreleased]
+
+(Active dev cycle. Drop the `-SNAPSHOT` suffix on `plugin-release` before tagging the next release.)
+
+## [0.112.2-1] — 2026-05-04 — `to edn --lines/--objects` + chained-pipeline fix
+
+First plugin-only patch on the `0.112.2` line. No Nushell anchor change; same Nushell-target as v0.112.2.
 
 ### Added
-- **`to edn --lines` / `to edn --objects`** — multi-form output. Mirrors `from edn --lines` / `from edn --objects` on the input side, but with a key asymmetry: the two flags are **synonyms** on `from edn` (parsing is whitespace-agnostic) but have **different separator semantics** on `to edn`:
+- **`to edn --lines` / `to edn --objects`** — multi-form output. Mirrors `from edn --lines` / `from edn --objects` on the input side, but with a deliberate asymmetry: the two flags are **synonyms** on `from edn` (parsing is whitespace-agnostic) but have **different separator semantics** on `to edn`:
   - `--lines` (`-l`) emits each item with a trailing newline (`<form>\n`). Line-discipline output that plays with `head`, `tail`, `wc -l`, line-buffered consumers.
   - `--objects` (`-o`) emits each item with a trailing single space (`<form> `). Compact concatenated-objects output, since EDN forms self-delimit and the parser doesn't care about whitespace shape.
   - For a list/table input, items are the elements. For a scalar/record input, the single value is treated as one item. Empty list → empty string.
-  - `from edn --objects | to edn --lines` is the natural normalizer: turn any-whitespace EDN streams into NDJSON-style line-separated EDN. Caveat: chained plugin commands hit a known limitation (see CHANGELOG below + CLAUDE.md).
-- 13 new integration tests covering both flags across scalar/list/record/empty inputs, plus round-trips through `from edn --lines/--objects`. Suite is now 60 cases.
+  - `from edn --objects | to edn --lines` is the natural normalizer: turn any-whitespace EDN streams into NDJSON-style line-separated EDN.
 
 ### Fixed
-- **Chained plugin calls in the same pipeline now work end-to-end**, including with incremental ByteStream input on the leading `from edn`. Pipelines like `bb produce.clj | from edn --lines | to edn --lines | from edn --lines | get i | math sum` now correctly produce results without `| collect` workarounds. Nushell pipelines plugin Calls concurrently — Call(B) arrives while we're still in Call(A) along with `:Data` for B's input stream — so the plugin now routes those messages: `:Call`s into a `pending-calls` queue (drained by the main loop after the current Call finishes), and foreign `:Data`/`:End` into per-stream `stream-buffers` (consulted by future readers). Implemented as a single `pull-stream-msg` helper used by all three stream readers (`read-byte-stream`, `read-list-stream`, `refill-stream-input!`). Single-threaded, no concurrency primitives. Added a regression test (`to edn --lines: bb-streamed round-trip via chained plugin Calls`) covering exactly this case. Suite is now 61.
+- **Chained plugin calls in the same pipeline now work end-to-end**, including with incremental ByteStream input on the leading `from edn`. Pipelines like `bb produce.clj | from edn --lines | to edn --lines | from edn --lines | get i | math sum` now produce correct results without `| collect` workarounds. Nushell pipelines plugin Calls concurrently — Call(B) arrives while we're still in Call(A) along with `:Data` for B's input stream — so the plugin now routes those messages: `:Call`s into a `pending-calls` queue (drained by the main loop after the current Call finishes), and foreign `:Data`/`:End` into per-stream `stream-buffers` (consulted by future readers). Implemented as a unified `pull-stream-msg` helper used by all three stream readers (`read-byte-stream`, `read-list-stream`, `refill-stream-input!`). Single-threaded, no concurrency primitives. Added a regression test (`to edn --lines: bb-streamed round-trip via chained plugin Calls`).
 
-### Planned for `to edn` (still pending)
-- `--pretty`, `--meta`, `--keep-keyword-prefix`, `--string-keys`, `--canonical` (cedn integration). Plus source spans on `from edn` parse errors. See CLAUDE.md §2 and §4.
+### Changed
+- **Roadmap reframed** around the typed-value boundary principle: `--pretty` and `--canonical` were dropped from the plugin's planned-flags list. They're better realised as standalone bb-script filters in their reference libraries' repos, composing via Unix pipes. The `cedn` CLI now exists in [canonical-edn](https://github.com/franks42/canonical-edn) as the reference example. CLAUDE.md has the full architectural rationale.
+- CI action versions bumped: `actions/checkout@v4 → @v6`, `DeLaGuardo/setup-clojure@13.0 → @13.6.0`. Eliminates the Node 20 deprecation warning on every workflow run.
+
+### Tests
+61/61 integration tests passing on Nushell 0.112.2 (was 47 in v0.112.2). 14 new cases covering the two new flags, the chained-Call round-trip, and edge cases.
+
+### Planned for the next milestone
+- Source spans on `from edn` parse errors (the biggest remaining UX gap).
+- `:examples` populated in both Signatures.
+- `to edn --meta`, `--keep-keyword-prefix`, `--string-keys` (still in scope per the boundary principle — they affect the typed walk, not output text).
+- See CLAUDE.md §2 and §4.
 
 ## [0.112.2] — 2026-05-03 — Nushell-aligned versioning + CI
 

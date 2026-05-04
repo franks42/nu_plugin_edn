@@ -134,7 +134,7 @@ Planned flags (only those that need plugin-side typed-value access — see "Plug
 These were planned earlier; we then realised they violate the **typed-value boundary principle** (see "Plugin scope" below). Both are pure text-on-text transformations of the EDN bytes the plugin already emits — they don't need access to Nushell typed values. Better realised as standalone bb-script filters in their own repos:
 
 - **Pretty-print**: a `pprint-edn` bb filter (`<edn> | pprint-edn`) wrapping `clojure.pprint`. Could live as a one-liner in user docs or as a small standalone tool.
-- **Canonical**: lives naturally in the [cedn](https://github.com/franks42/cedn) repo as a `cedn` filter binary (cedn library + ~5 LOC of stdin/stdout I/O), released alongside the cedn library on GitHub Releases. `data | to edn | cedn` composes via Unix pipes; no plugin coupling, no dep management for `nu_plugin_edn`, and the filter is reusable in any pipeline that produces EDN bytes (not just Nushell-driven ones).
+- **Canonical**: shipped as the `cedn` CLI in the [canonical-edn](https://github.com/franks42/canonical-edn) repo (single bb script wrapping the cedn library). Compose via Unix pipes: `data | to edn | ^cedn | from edn` round-trips through canonical form; `data | to edn | ^cedn | sha256sum` produces a deterministic content hash. Released alongside the cedn library on GitHub Releases as a versioned asset. Reusable in any pipeline that produces EDN bytes — not just Nushell-driven ones.
 
 This principle cleans up the plugin's surface area significantly and lets each transformation evolve at its own cadence in its own repo.
 
@@ -303,10 +303,10 @@ Most "do something with EDN" needs are better satisfied as **bb-script filters l
 
 ### Filters that should ship from their library repos
 
-- **`cedn`** — canonical EDN filter, ~5 LOC bb script wrapping the [canonical-edn (cedn)](https://github.com/franks42/cedn) library. Ships from the cedn repo, versioned alongside the library, distributed via GitHub Releases just like `nu_plugin_edn` is. Use case: `data | to edn | cedn | sha256sum` for content hashing, `... | cedn | bb sign.clj` for signing flows. Cross-validated against JCS — output is structurally JSON-equivalent.
-- **`uuidv7`** — UUIDv7 generator/parser CLI, ships from [uuidv7.cljc](../uuidv7.cljc). Subcommands: `uuidv7 gen` (generate), `uuidv7 parse <id>` (extract `{timestamp ...}` as EDN), `uuidv7 from-ts <ts>` (synthesize from a given timestamp). Replaces what would otherwise be a `nu_plugin_uuidv7` — Nushell calls `^uuidv7 gen` like any external command, and `^uuidv7 parse $id | from edn` rehydrates a structured record.
-- **`pprint-edn`** — bb filter wrapping `clojure.pprint`. Could live in its own tiny repo or as a scripts-collection.
-- **Signet CLIs** — `signet-keygen`, `signet-sign`, `signet-verify`, etc., from the [signet](https://github.com/franks42/cljc-25519) repo (the cljc-25519 / signet library). Composable with `to edn | cedn` as the canonical-bytes producer.
+- ✅ **`cedn`** — canonical EDN filter shipped from the [canonical-edn](https://github.com/franks42/canonical-edn) repo. Single bb script (`bin/cedn`) wrapping the cedn library, with `--input`/`--output`/`--edn`/`--objects`/`--help`/`--version` flags. Streams form-by-form, EPIPE-clean, dev-mode uses local source / release-mode pulls cedn from Clojars via `add-deps`. Released as a versioned asset on GitHub Releases. Use cases: `data | to edn | ^cedn | sha256sum` (content hash), `data | to edn | ^cedn | from edn` (canonical round-trip via Nushell), `cat config.edn | ^cedn` (normalize whitespace). The pattern (single bb script in the reference library's repo, GH-Released alongside the library) is the template for the next two.
+- ⏳ **`uuidv7`** — UUIDv7 generator/parser CLI, would ship from [uuidv7.cljc](../uuidv7.cljc). Suggested subcommands: `uuidv7 gen` (generate), `uuidv7 parse <id>` (extract `{timestamp ...}` as EDN), `uuidv7 from-ts <ts>` (synthesize from a given timestamp). Replaces what would otherwise be a `nu_plugin_uuidv7` — Nushell calls `^uuidv7 gen` like any external command, and `^uuidv7 parse $id | from edn` rehydrates a structured record.
+- ⏳ **`pprint-edn`** — bb filter wrapping `clojure.pprint`. Could live in its own tiny repo or as a scripts-collection.
+- ⏳ **Signet CLIs** — `signet-keygen`, `signet-sign`, `signet-verify`, etc., from the [signet](https://github.com/franks42/cljc-25519) repo (the cljc-25519 / signet library). Composable with `to edn | ^cedn` as the canonical-bytes producer.
 
 ### Plugins that genuinely need to be plugins
 
