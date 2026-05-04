@@ -565,6 +565,36 @@ if $has_cedn {
     check "ecosystem: cedn output is byte-stable across runs" (
         ({user: "alice"} | to edn | ^cedn) == ({user: "alice"} | to edn | ^cedn)
     ) true
+
+    # Equivalence test: does `nu_value | to edn | ^cedn` produce the
+    # same canonical bytes as feeding the equivalent EDN literal
+    # directly into `^cedn --edn`? If the plugin's `to edn` introduces
+    # a structural drift (wrong key type, missing field, type
+    # coercion surprise) the bytes diverge. Whitespace differences
+    # alone wouldn't trip this — cedn re-canonicalizes — but anything
+    # that actually changes the value will. This is the worry-killer
+    # test for "did a stray newline / type quirk screw things up?"
+    check "ecosystem: nu pipeline canonical bytes == direct cedn --edn invocation" (
+        ({a: 1, b: [2 3], c: "hello"} | to edn | ^cedn)
+        == (^cedn --edn '{:a 1 :b [2 3] :c "hello"}')
+    ) true
+
+    # Same idea on a richer shape — nested types and string lists.
+    # If `to edn` emits any element in a form that re-canonicalizes
+    # differently from the equivalent EDN literal, this catches it.
+    check "ecosystem: nu pipeline canonical bytes match cedn --edn on richer shape" (
+        ({user: "alice", age: 30, active: true, tags: ["admin" "viewer"]} | to edn | ^cedn)
+        == (^cedn --edn '{:user "alice" :age 30 :active true :tags ["admin" "viewer"]}')
+    ) true
+
+    # And the headline use case from the README — same value, two
+    # paths to the SHA-256 hash. If they match, the hash a Clojure
+    # programmer would compute via `(sha256 (cedn/canonical-bytes v))`
+    # is the same hash a Nushell user would get via the pipeline.
+    check "ecosystem: nu | to edn | ^cedn | sha256sum == direct cedn --edn | sha256sum" (
+        ({b: 2, a: 1} | to edn | ^cedn | sha256sum | str trim)
+        == (^cedn --edn '{:a 1 :b 2}' | sha256sum | str trim)
+    ) true
 }
 
 # --- uuidv7 integration ---
