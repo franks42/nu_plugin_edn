@@ -336,7 +336,7 @@ external command piped through `^name` syntax.
 | `Date`            | `#inst "..."`             | round-trips                    |
 | `Record`          | `{:k v ...}`              | keyword keys; with `--record2set`, mirror-form `{k: k}` records emit as `#{:k ...}` (keyword sets) |
 | `List` / table    | `[v ...]`                 |                                |
-| `Duration`        | integer milliseconds      | lossy: ns precision dropped    |
+| `Duration`        | integer milliseconds      | lossy by 6 orders of magnitude — see [Type quirks](#type-quirks-to-watch-for). With `--duration-ns`, integer nanoseconds (lossless). |
 | `Filesize`        | integer bytes             | unit dropped                   |
 | `Binary`          | base64 string             | not a tagged literal           |
 | `Range`, `Closure`, `CellPath`, `CustomValue`, `Error` | `"#<TypeName>"` placeholder | best-effort, not round-trippable |
@@ -361,6 +361,31 @@ By default, EDN sets become Nushell lists (Nushell has no native set type). Opt 
 ```
 
 `--pprint` is mutually exclusive with `--lines` / `--objects`. For canonical (byte-stable) output suitable for hashing/signing, pipe through the [`cedn` CLI](https://github.com/franks42/canonical-edn) instead — different tool, different purpose.
+
+### Type quirks to watch for
+
+A handful of `to edn` defaults are pragmatic rather than lossless. Worth knowing about so they don't surprise you when output diverges from what a Clojure programmer would have written by hand:
+
+- **`Duration` defaults to milliseconds (lossy)** — Nushell stores Duration as nanoseconds, but the EDN integer we emit truncates to ms because that's the conventional unit for elapsed times in EDN-shaped APIs. Pass `--duration-ns` for lossless ns integer:
+  ```nu
+  {d: 1234567ns} | to edn                 # => {:d 1}            (ms, lossy)
+  {d: 1234567ns} | to edn --duration-ns   # => {:d 1234567}      (ns, lossless)
+  ```
+  No standard `#duration` EDN tag exists, so the bb consumer needs to know the unit from context. (`#inst` / `Date` is separate and preserves nanosecond precision through `cedn` already — see the canonical-edn library's `format-inst`.)
+
+- **`Filesize` emits as integer bytes — unit dropped.** `1MiB` becomes `1048576`. The bb consumer doesn't see "MiB" anywhere.
+
+- **`Binary` emits as a base64 string, not a tagged literal.** `cedn` has a custom `#bytes` reader that round-trips properly; we don't use it because that would bind us to a non-standard EDN extension.
+
+- **EDN keywords round-trip lossily by default.** `:foo` → Nushell `"foo"` (colon dropped). The string `"foo"` and the keyword `:foo` collapse into the same Nushell value. Opt into fidelity with the paired `--keep-keyword-prefix` flag (see [Known limitations](#known-limitations)).
+
+- **EDN sets become Nushell lists by default.** Nushell has no native set type. Opt into the `{k: k}` mirror-record convention with `--set2record` / `--record2set` (see [EDN sets](#edn-sets)).
+
+- **Record keys are emitted as keywords by default.** `{name: "alice"}` becomes `{:name "alice"}`. For non-Clojure consumers, use `--string-keys` to get `{"name" "alice"}`.
+
+- **Nushell `Range`, `Closure`, `CellPath`, `CustomValue`, `Error` have no EDN equivalent.** They emit as `"#<TypeName>"` placeholder strings. Don't expect round-trip.
+
+If your pipeline goes `nu | to edn | ^cedn | sha256sum` (a content hash for signing/comparison), and a bb script computes `(sha256 (cedn/canonical-bytes v))` directly, the hashes will match **only if `to edn`'s representation matches the value the bb side has in mind**. The integration tests in `nu_plugin_edn.tests.nu` include equivalence checks (`nu pipeline canonical bytes == direct ^cedn --edn invocation`) that catch structural drift.
 
 ## Known limitations
 
@@ -396,4 +421,4 @@ bb check      # lint + fmt-check, the pre-commit task
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — same as Nushell. See `LICENSE`.

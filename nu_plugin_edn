@@ -124,6 +124,14 @@
 ;; effect of --keep-keyword-prefix still works independently.
 (def ^:dynamic *string-keys* false)
 
+;; Dynamic var `*duration-ns*` (bound by handle-to-edn when --duration-ns
+;; is on): when true, Nushell Duration values emit as integer
+;; nanoseconds (lossless — Nushell stores ns natively); when false
+;; (default), they emit as integer milliseconds (lossy by 6 orders of
+;; magnitude, but matches the conventional unit a bb consumer sees
+;; for elapsed times in EDN-shaped APIs).
+(def ^:dynamic *duration-ns* false)
+
 ;; Pragmatic check: ":foo", ":foo/bar", ":foo.bar-baz", etc. Rejects
 ;; ":" alone, ":foo bar" (whitespace), ":\"foo\"" (quotes). Doesn't
 ;; aim for full EDN spec compliance — just a heuristic for whether a
@@ -242,9 +250,12 @@
      (java.time.Instant/parse (get-in v [:Date :val])))
 
     (contains? v :Duration)
-    ;; Nushell durations are nanoseconds; ms is the most universally
-    ;; useful integer representation. Truncates sub-ms precision.
-    (long (/ (get-in v [:Duration :val]) 1000000))
+    ;; Nushell durations are nanoseconds. Default emit is ms (lossy
+    ;; but matches the conventional unit for elapsed times in
+    ;; EDN-shaped APIs). With --duration-ns, emit raw ns integer
+    ;; (lossless; the bb consumer needs to know the unit by context).
+    (let [ns-val (get-in v [:Duration :val])]
+      (if *duration-ns* ns-val (long (/ ns-val 1000000))))
 
     (contains? v :Filesize)
     (get-in v [:Filesize :val])
@@ -801,6 +812,9 @@
                   :var_id nil :default_value nil}
                  {:long "meta" :short nil :arg "Any" :required false
                   :desc "Prefix the emitted top-level form with a Clojure-reader-style metadata map (^{...} <form>). Useful for attaching provenance/context that a bb consumer reads via (meta v). NON-PORTABLE: ^{...} is Clojure-reader syntax, not part of the EDN spec — Python/JS/Go EDN parsers will reject it. Mutually exclusive with --lines/--objects."
+                  :var_id nil :default_value nil}
+                 {:long "duration-ns" :short nil :arg nil :required false
+                  :desc "Emit Nushell Duration values as integer nanoseconds (lossless; Nushell stores ns natively) instead of the default integer milliseconds (lossy by 6 orders of magnitude). The bb consumer needs to know the unit from context — there is no standard #duration EDN tag."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -934,7 +948,8 @@
       :else
       (binding [*record-as-set*       (flag-set? named "record2set")
                 *keep-keyword-prefix* (flag-set? named "keep-keyword-prefix")
-                *string-keys*         (flag-set? named "string-keys")]
+                *string-keys*         (flag-set? named "string-keys")
+                *duration-ns*         (flag-set? named "duration-ns")]
         (try
           (let [items (cond
                         (= "Empty" input)

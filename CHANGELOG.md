@@ -10,6 +10,15 @@ once a 1.0 ships.
 
 (Active dev cycle. `plugin-release` is `0.112.2-3-SNAPSHOT`. Drop the suffix before tagging the next release.)
 
+### Added
+
+- **`to edn --duration-ns`** — opt into lossless Duration emission as integer nanoseconds. Default stays integer milliseconds (matches conventional EDN-API units). Catches the case where Nushell sub-millisecond Durations would otherwise truncate (`1234567ns` → `1` ms vs `1234567` ns).
+- README: new "Type quirks to watch for" section documenting Duration / Filesize / Binary / keyword / set / record-key conventions explicitly so they don't surprise users round-tripping with bb-side scripts.
+
+### Tests
+
+- Three ecosystem equivalence tests verifying that `nu | to edn | ^cedn | sha256sum` produces the same canonical bytes (and therefore hash) as `^cedn --edn '<equivalent literal>'`. Catches structural drift between the plugin's `to edn` output and the EDN literal a Clojure programmer would write for the same value. Skipped when `^cedn` is not on PATH.
+
 ## [0.112.2-2] — 2026-05-04 — flag-pair completion + spans + drift fix
 
 Second plugin-only patch on the `0.112.2` line. Substantial dev window: keyword-fidelity round-trip, string keys for non-Clojure consumers, Clojure reader metadata, source-span error labels, mid-stream error surfacing, and a fix for the long-broken nushell-drift watcher.

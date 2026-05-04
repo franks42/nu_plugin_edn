@@ -187,6 +187,18 @@ check "to edn: duration -> ms int" (
     {d: 1sec} | to edn
 ) "{:d 1000}"
 
+check "to edn --duration-ns: duration -> ns int (lossless)" (
+    {d: 1sec} | to edn --duration-ns
+) "{:d 1000000000}"
+
+check "to edn --duration-ns: sub-ms precision survives" (
+    {d: 1234567ns} | to edn --duration-ns
+) "{:d 1234567}"
+
+check "to edn (default): sub-ms precision is dropped" (
+    {d: 1234567ns} | to edn
+) "{:d 1}"
+
 check "to edn: date -> #inst" (
     {at: 2024-01-15T10:30:00Z} | to edn
 ) '{:at #inst "2024-01-15T10:30:00.000-00:00"}'
