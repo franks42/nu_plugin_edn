@@ -164,10 +164,8 @@ The remaining limitation is producer-side: bb's default behaviour is to swallow 
 
 ### 4. Better error reporting
 
-Two distinct gaps:
-
-- **Single-form mode**: parse errors return as `:Error` with a message, but `labels []` is empty — Nushell can't highlight the offending position in the source. Compute the span from the EDN reader's exception (it knows char position) and emit it.
-- **Multi-form streaming mode**: once the plugin has opened a `ListStream` and started emitting `:Data`, it can't switch to an `:Error` response — the protocol doesn't allow it. Currently a mid-stream parse error is logged to stderr and the stream is closed (truncated output, no error visible to the user). Better behavior: emit a Nushell `Value::Error` as the final list element so downstream sees the error inline. Polish item, not blocker.
+- **Single-form and buffered multi-form modes**: parse errors carry a source-span label pointing at the offending position. We wrap the input in a `clojure.lang.LineNumberingPushbackReader`, run `clojure.edn/read` against it, and on exception query the reader's `.getLineNumber` / `.getColumnNumber`. Translating that 1-indexed position into a 0-indexed char offset, then a UTF-8 byte offset (Nushell spans are byte-indexed), and adding the source span's `:start` gives an absolute position that Nushell underlines in the rendered error. ByteStream input gets no label — its bytes have no script-level span, so there's nothing to point at.
+- **Multi-form streaming mode** (incremental over a `ByteStream`): once the plugin has opened a `ListStream` and started emitting `:Data`, it can't switch to an `:Error` response — the protocol doesn't allow it. Currently a mid-stream parse error is logged to stderr and the stream is closed (truncated output, no error visible to the user). Better behavior: emit a Nushell `Value::Error` as the final list element so downstream sees the error inline. Polish item, not blocker.
 
 ### 5. Plugin signature and metadata
 
@@ -214,7 +212,7 @@ What the suite covers today (63 unconditional + up-to-7 conditional ecosystem te
 - **Ecosystem integration** (conditional): `^cedn` round-trip, canonicalization key-sort verification, byte-stability across runs; `^uuidv7 gen` shape, `^uuidv7 parse | from edn` record-shape; cross-tool `uuidv7 gen --format edn → from edn → to edn → ^cedn`. Skipped silently if the CLIs aren't on PATH (no `which cedn` / `which uuidv7`).
 
 Gaps (deliberately or as TODO):
-- **Error-case tests** — malformed EDN, missing closing brace, truncated input. The test file admits this gap in a comment. Add when error reporting (section 4) gets source spans.
+- **Error-case tests** — malformed EDN, missing closing brace, truncated input. Five cases live in the test file: error happens, useful message, source-span label present (Value input), no label for ByteStream input, label present in `--lines` mode. Exact span offsets aren't asserted (they shift with surrounding script bytes).
 - **Megabyte-scale streaming tests** — current largest is 5000 records (~30 KB).
 - **Unbounded producer + `first N`** — works correctness-wise, but bb itself doesn't die on EPIPE so the test would leak processes; needs a non-bb producer (`yes`, `tail -f`) to be reliable.
 - **Per-flag tests** for the planned `to edn` flags (`--meta`, `--keep-keyword-prefix`, `--string-keys`) — add as each lands. (`--pretty` and `--canonical` were dropped from the plugin per the typed-value boundary principle; their tests live with whichever filter implements them.)

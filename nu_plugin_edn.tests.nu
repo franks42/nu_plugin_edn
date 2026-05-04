@@ -363,9 +363,44 @@ check "set2record + record2set: round-trip preserves keyword set" (
 ) ["admin" "editor" "viewer"]
 
 # --- error cases ---
-# Note: the prototype emits :Error with msg but no source span. These
-# tests just verify that malformed input produces an error rather than
-# a successful but wrong parse.
+# Parse errors carry a source-span label pointing at the offending
+# location in the user's script (Value input only — ByteStream input
+# has no script-level span and gets a label-less error).
+
+check "error: malformed map produces error" (
+    try { '{:a 1 :b}' | from edn; "no error" } catch { |_| "error" }
+) "error"
+
+check "error: malformed map carries useful message" (
+    try { '{:a 1 :b}' | from edn; "" } catch { |e|
+        $e.msg | str starts-with "EDN parse error:"
+    }
+) true
+
+# Source-span label: Value input (literal string) → labels[0].span
+# points at the failing position in the source. The exact start/end
+# offsets vary with surrounding script bytes, so we just assert that
+# a label is present with the expected text.
+check "error: Value input carries source-span label" (
+    try { '{:a 1 :b}' | from edn; null } catch { |e|
+        let parsed = ($e.json | from json)
+        ($parsed.labels | length) > 0 and (
+            ($parsed.labels | first | get text) == "parse error here"
+        )
+    }
+) true
+
+check "error: ByteStream input has no source-span label" (
+    try { ^bash -c 'echo "{:a 1 :b}"' | from edn; null } catch { |e|
+        ($e.json | from json | get labels | length) == 0
+    }
+) true
+
+check "error: --lines mode also carries source-span label on bad form" (
+    try { '1 :foo {:bad}' | from edn --lines | length; null } catch { |e|
+        ($e.json | from json | get labels | length) > 0
+    }
+) true
 
 # --- Ecosystem integration ---
 # Tests that exercise composition with adjacent CLI tools from the

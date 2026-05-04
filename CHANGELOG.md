@@ -12,6 +12,7 @@ once a 1.0 ships.
 
 ### Added (post-v0.112.2-1)
 
+- **Source-span labels on `from edn` parse errors**. Nushell now underlines the offending position in the user's source when an EDN literal fails to parse. Implementation wraps the input in a `clojure.lang.LineNumberingPushbackReader`, runs `clojure.edn/read` against it, and on exception queries the reader for line/column — translated to a UTF-8 byte offset and added to the source span's `:start`. Single-form and buffered multi-form (`--lines` over a Value) paths both carry labels. ByteStream input has no script-level span and emits the message without a label, as before. Five new error tests cover the matrix.
 - **`to edn --pprint`** (`-p`): pretty-print output via `clojure.pprint` instead of compact `pr-str`. Mutually exclusive with `--lines` / `--objects`.
 - **`from edn --set2record`** + **`to edn --record2set`** — paired flags for round-tripping keyword/string EDN sets through Nushell records in mirror form (`{k: k}`). Default behaviour (set → list) is unchanged. Loss-free for keyword/string sets only; int and composite-element sets degrade since Nushell record keys are always strings.
 - **`#inst` / `#uuid` tagged-literal handling in `from edn`**: `#inst "..."` now produces a Nushell `Date` (was: stringified Java Date through `:else`); `#uuid "..."` produces a Nushell `String` (Nushell has no UUID type — use the `^uuidv7` CLI for UUIDv7-aware operations).

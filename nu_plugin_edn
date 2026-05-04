@@ -7,7 +7,6 @@
 ;; Known limitations (see CLAUDE.md for the full list):
 ;;   - Keywords lose round-trip fidelity: `:file` -> "file" (colon dropped).
 ;;     A `--keep-keyword-prefix` flag is planned for opt-in fidelity.
-;;   - Errors don't carry source spans
 ;;   - No tagged-literal support beyond what edn/read-string handles natively
 ;;   - `to edn` emits compact form via pr-str. Pretty-printing, --meta, and
 ;;     --keep-keyword-prefix flags are planned (see CLAUDE.md roadmap).
@@ -353,20 +352,76 @@
 (def next-stream-id (atom 0))
 (defn alloc-stream-id [] (swap! next-stream-id inc))
 
-;; Read zero or more top-level EDN forms from a string. We deliberately
-;; use form boundaries (matching brackets, quoted strings, etc.) rather
-;; than newlines: EDN forms are self-delimiting, multi-line forms parse
-;; correctly, and `; comments` work because edn/read strips them. The
-;; tradeoff is that one giant top-level form forces the whole stream
-;; into memory — but well-behaved producers emit small forms.
-(defn read-all-forms [s]
-  (let [reader (java.io.PushbackReader. (java.io.StringReader. s))
+;; Source-span computation for parse errors.
+;;
+;; clojure.edn's parser doesn't expose the failing position directly,
+;; but a LineNumberingPushbackReader does — even after the parser
+;; throws, .getLineNumber/.getColumnNumber give the reader's last
+;; position. Translating that (1-indexed line, 1-indexed col) into a
+;; 0-indexed char offset, then into a UTF-8 byte offset, lets us point
+;; the Nushell error label at the offending location in the user's
+;; source.
+;;
+;; Scope: only Value-input parse errors get labels, because those are
+;; the only ones with a meaningful source span pointing into the
+;; user's script. ByteStream input came from an external producer's
+;; stdout, so no script-level span exists; we omit labels there.
+(defn- char-offset-in
+  "Convert (line, col) from a LineNumberingPushbackReader into a
+  0-indexed character offset in `s`. Both line and col are 1-indexed
+  on the reader. Caps at end-of-string for safety."
+  [^String s line col]
+  (let [n (.length s)]
+    (loop [idx 0, ln 1, cl 1]
+      (cond
+        (>= idx n)                            idx
+        (and (= ln line) (= cl col))          idx
+        (= \newline (.charAt s idx))          (recur (inc idx) (inc ln) 1)
+        :else                                 (recur (inc idx) ln (inc cl))))))
+
+(defn- byte-offset-of-char
+  "UTF-8 byte length of the prefix of s up to char-offset chars."
+  [^String s char-offset]
+  (let [end (min char-offset (.length s))]
+    (alength (.getBytes ^String (subs s 0 end) "UTF-8"))))
+
+;; Read EDN forms from a string with line/col tracking. `multi?` true
+;; reads zero-or-more top-level forms (--lines mode); `multi?` false
+;; reads exactly one (default). Returns {:ok forms-or-value} or
+;; {:err {:line N :col M :cause Throwable}}.
+;;
+;; We deliberately use form boundaries (matching brackets, quoted
+;; strings, etc.) rather than newlines: EDN forms are self-delimiting,
+;; multi-line forms parse correctly, and `; comments` work because
+;; edn/read strips them. The tradeoff is that one giant top-level form
+;; forces the whole stream into memory — but well-behaved producers
+;; emit small forms.
+(defn- read-edn-with-pos [s multi?]
+  (let [reader (clojure.lang.LineNumberingPushbackReader.
+                (java.io.StringReader. s))
         eof    (Object.)]
-    (loop [acc []]
-      (let [v (edn/read {:eof eof} reader)]
-        (if (= v eof)
-          acc
-          (recur (conj acc v)))))))
+    (try
+      (if multi?
+        (loop [acc []]
+          (let [v (edn/read {:eof eof} reader)]
+            (if (= v eof)
+              {:ok acc}
+              (recur (conj acc v)))))
+        ;; Single-form: preserve `edn/read-string ""` => nil; only a
+        ;; non-empty empty parse counts as "parsed nothing".
+        (let [v (edn/read {:eof eof} reader)]
+          {:ok (if (= v eof) nil v)}))
+      (catch Throwable t
+        {:err {:line  (.getLineNumber reader)
+               :col   (.getColumnNumber reader)
+               :cause t}}))))
+
+(defn read-all-forms [s]
+  ;; Back-compat shim used by emit-stream-incremental's siblings; we
+  ;; keep it for clarity even though handle-from-edn uses the
+  ;; position-tracking variant directly.
+  (let [{:keys [ok err]} (read-edn-with-pos s true)]
+    (if err (throw (:cause err)) ok)))
 
 ;; Detect a switch by name in the call's :named entries. Each entry is
 ;; a [{:item "name" :span ...} value] pair; we only care about presence.
@@ -529,32 +584,61 @@
       (send-msg {:Drop in-sid}))
     (send-msg {:End out-sid})))
 
-;; Pull the EDN text out of whatever pipeline shape Nushell handed us.
+;; Pull the EDN text out of whatever pipeline shape Nushell handed us,
+;; along with the source span of the literal it came from (when known).
 ;; Three shapes show up in practice:
-;;   - "Empty"               — no upstream input; treat as empty string
-;;   - {:Value [v meta]}      — a single in-memory Value (e.g. literal string)
-;;   - {:ByteStream {:id N}}  — an external command's stdout
+;;   - "Empty"               — no upstream input; "" + nil span
+;;   - {:Value [v meta]}      — a single in-memory Value; span is the
+;;                              source span of the original String node
+;;   - {:ByteStream {:id N}}  — an external command's stdout; bytes
+;;                              have no script-level span, so nil
 ;; ListStream isn't handled yet because EDN parsing wants one document,
 ;; not a stream of values; if a user really wants `... | lines | from edn`
 ;; they can pipe through `collect` first.
-(defn extract-input [input]
+(defn extract-input-with-span [input]
   (cond
     (= "Empty" input)
-    ""
+    {:text "" :span nil}
 
     (and (map? input) (contains? input :Value))
-    (or (get-in input [:Value 0 :String :val]) "")
+    {:text (or (get-in input [:Value 0 :String :val]) "")
+     :span (get-in input [:Value 0 :String :span])}
 
     (and (map? input) (contains? input :ByteStream))
-    (read-byte-stream (get-in input [:ByteStream :id]))
+    {:text (read-byte-stream (get-in input [:ByteStream :id]))
+     :span nil}
 
     :else
-    ""))
+    {:text "" :span nil}))
 
-(defn send-error-response [call-id msg]
-  (send-msg {:CallResponse
-             [call-id {:Error {:msg msg :labels [] :code nil
-                               :url nil :help nil :inner []}}]}))
+(defn send-error-response
+  ([call-id msg] (send-error-response call-id msg []))
+  ([call-id msg labels]
+   (send-msg {:CallResponse
+              [call-id {:Error {:msg msg :labels labels :code nil
+                                :url nil :help nil :inner []}}]})))
+
+;; Build an error label that points at the parse-error position. Returns
+;; a singleton vec for use directly as the :labels field, or [] if we
+;; don't have enough info to point anywhere useful (no source span, or
+;; missing line/col). The span we emit is one byte wide — Nushell will
+;; underline that single position in the source view.
+(defn- parse-error-labels [text source-span line col]
+  (if (and source-span line col (pos? line) (pos? col))
+    (let [char-off (char-offset-in text line col)
+          byte-off (byte-offset-of-char text char-off)
+          start    (+ (:start source-span) byte-off)
+          end      (min (inc start) (:end source-span))]
+      [{:text "parse error here" :span {:start start :end end}}])
+    []))
+
+(defn- parse-error-message [^Throwable t]
+  ;; clojure.edn wraps the inner cause in EdnReader$ReaderException;
+  ;; the cause's message is the readable one ("Map literal must
+  ;; contain an even number of forms" rather than
+  ;; "java.lang.RuntimeException: Map literal …").
+  (or (some-> (.getCause t) .getMessage)
+      (.getMessage t)))
 
 (def from-edn-sig
   {:sig {:name "from edn"
@@ -641,6 +725,12 @@
      :description "Cross-tool: canonicalize and round-trip a value through the cedn CLI."
      :result      nil}]})
 
+(defn- send-from-edn-error [call-id text source-span line col cause]
+  (send-error-response
+   call-id
+   (str "EDN parse error: " (parse-error-message cause))
+   (parse-error-labels text source-span line col)))
+
 (defn handle-from-edn [call-id run]
   (let [input  (:input run)
         named  (get-in run [:call :named])
@@ -656,20 +746,23 @@
         ;; Multi-form mode + non-stream input (Value / Empty)  ->
         ;; buffer the string, parse all forms, emit as a ListStream.
         multi?
-        (try
-          (emit-list-stream call-id (read-all-forms (extract-input input)))
-          (catch Throwable t
-            (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))
+        (let [{:keys [text span]} (extract-input-with-span input)
+              {:keys [ok err]}    (read-edn-with-pos text true)]
+          (if err
+            (send-from-edn-error call-id text span
+                                 (:line err) (:col err) (:cause err))
+            (emit-list-stream call-id ok)))
 
         ;; Single-form mode (default)  ->  buffered, return a single Value.
         :else
-        (try
-          (let [parsed (edn/read-string (extract-input input))]
+        (let [{:keys [text span]} (extract-input-with-span input)
+              {:keys [ok err]}    (read-edn-with-pos text false)]
+          (if err
+            (send-from-edn-error call-id text span
+                                 (:line err) (:col err) (:cause err))
             (send-msg {:CallResponse
                        [call-id
-                        {:PipelineData {:Value [(->nu-value parsed) nil]}}]}))
-          (catch Throwable t
-            (send-error-response call-id (str "EDN parse error: " (.getMessage t)))))))))
+                        {:PipelineData {:Value [(->nu-value ok) nil]}}]})))))))
 
 ;; Collect a ListStream input into a vector of Values. The engine
 ;; sends {:Data [<id> {:List <value>}]} messages until {:End <id>}.

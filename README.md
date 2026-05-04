@@ -194,8 +194,6 @@ By default, EDN sets become Nushell lists (Nushell has no native set type). Opt 
   memory before parsing. Fine for configs; for log-sized single
   documents, prefer multi-form mode (`--lines`) which is fully
   incremental.
-- **Errors lack source spans**: parse errors show a message but don't
-  highlight the offending location in the input.
 - **Keyword round-trip**: `from edn` strips the leading colon
   (`:file` → `"file"`, namespaces preserved); `to edn` emits all
   string-shaped fields as plain strings. A `--keep-keyword-prefix`
