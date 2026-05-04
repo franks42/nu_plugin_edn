@@ -8,16 +8,27 @@ once a 1.0 ships.
 
 ## [Unreleased]
 
-(Active dev cycle. `plugin-release` is `0.112.2-3-SNAPSHOT`. Drop the suffix before tagging the next release.)
+(Active dev cycle. Drop the `-SNAPSHOT` suffix on `plugin-release` before tagging the next release.)
+
+## [0.112.2-3] — 2026-05-04 — agent reference + Duration precision opt-in
+
+Third plugin-only patch on the `0.112.2` line. Adds `AGENTS.md` (LLM-facing usage reference), an opt-in lossless Duration encoding, expanded type-quirks documentation, and ecosystem equivalence tests.
 
 ### Added
 
+- **`AGENTS.md`** — terse reference doc for LLM agents running `nu` with the plugin in a shell session. Interface tables, 5 common patterns, 11 frequency-ordered gotchas, quoting tips, type mappings, anti-patterns. Distinct audience from README (human tutorial) and CLAUDE.md (developer plan).
 - **`to edn --duration-ns`** — opt into lossless Duration emission as integer nanoseconds. Default stays integer milliseconds (matches conventional EDN-API units). Catches the case where Nushell sub-millisecond Durations would otherwise truncate (`1234567ns` → `1` ms vs `1234567` ns).
 - README: new "Type quirks to watch for" section documenting Duration / Filesize / Binary / keyword / set / record-key conventions explicitly so they don't surprise users round-tripping with bb-side scripts.
+- README: 3-step Setup section with proper links to upstream Nushell + Babashka install pages. Restructured Use into a tutorial flow (basics → nu pipeline ops → bb-as-producer → bb-as-consumer → round-trip → ^app filter pattern with substantive ^cedn / ^uuidv7 examples).
 
 ### Tests
 
 - Three ecosystem equivalence tests verifying that `nu | to edn | ^cedn | sha256sum` produces the same canonical bytes (and therefore hash) as `^cedn --edn '<equivalent literal>'`. Catches structural drift between the plugin's `to edn` output and the EDN literal a Clojure programmer would write for the same value. Skipped when `^cedn` is not on PATH.
+- Four `--duration-ns` tests covering default ms, opt-in ns, sub-ms precision survival, and sub-ms truncation under the default.
+
+### Fixed
+
+- README: broken Nushell install URL (`/install/` 404'd; the actual page is `/book/installation.html`).
 
 ## [0.112.2-2] — 2026-05-04 — flag-pair completion + spans + drift fix
 
