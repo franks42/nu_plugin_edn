@@ -416,13 +416,6 @@
                :col   (.getColumnNumber reader)
                :cause t}}))))
 
-(defn read-all-forms [s]
-  ;; Back-compat shim used by emit-stream-incremental's siblings; we
-  ;; keep it for clarity even though handle-from-edn uses the
-  ;; position-tracking variant directly.
-  (let [{:keys [ok err]} (read-edn-with-pos s true)]
-    (if err (throw (:cause err)) ok)))
-
 ;; Detect a switch by name in the call's :named entries. Each entry is
 ;; a [{:item "name" :span ...} value] pair; we only care about presence.
 (defn flag-set? [named flag-name]
