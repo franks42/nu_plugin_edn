@@ -28,12 +28,21 @@ jobs:
       - name: Read current anchor and latest Nushell tag
         id: versions
         run: |
-          CURRENT=$(grep -oE '\(def nushell-target[^)]+\)' nu_plugin_edn \
-                    | grep -oE '"[^"]+"' \
-                    | tail -1 \
-                    | tr -d '"')
+          # Extract the fallback version literal from the (multi-line)
+          # nushell-target def. Splitting on `"` then taking the 4th
+          # field of the line containing NU_PLUGIN_EDN_NU_VERSION gives
+          # us the literal directly:
+          #   field 1: '  (or (System/getenv '
+          #   field 2: 'NU_PLUGIN_EDN_NU_VERSION'
+          #   field 3: ') '
+          #   field 4: '0.112.2'
+          CURRENT=$(awk -F'"' '/NU_PLUGIN_EDN_NU_VERSION/ {print $4; exit}' nu_plugin_edn)
           LATEST=$(curl -sL https://api.github.com/repos/nushell/nushell/releases/latest \
                    | jq -r .tag_name)
+          if [ -z "$CURRENT" ]; then
+            echo "::error::Could not extract nushell-target from plugin source"
+            exit 1
+          fi
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "latest=$LATEST"   >> "$GITHUB_OUTPUT"
           echo "Plugin anchor: $CURRENT"
@@ -88,8 +97,16 @@ jobs:
           # Bump nushell-target to the latest. Set plugin-release to
           # the new version with a -SNAPSHOT suffix so a human still
           # has to drop SNAPSHOT and tag explicitly to ship.
-          sed -i "s|\"NU_PLUGIN_EDN_NU_VERSION\") \"${CURRENT}\"|\"NU_PLUGIN_EDN_NU_VERSION\") \"${LATEST}\"|" nu_plugin_edn
-          sed -i "s|(def plugin-release \"${CURRENT}\")|(def plugin-release \"${LATEST}-SNAPSHOT\")|" nu_plugin_edn
+          # Patterns use `[^"]*` so we replace whatever's currently in
+          # the literal — works regardless of whether plugin-release
+          # carries a -SNAPSHOT suffix at the moment.
+          sed -i 's|"NU_PLUGIN_EDN_NU_VERSION") "[^"]*"|"NU_PLUGIN_EDN_NU_VERSION") "'"${LATEST}"'"|' nu_plugin_edn
+          sed -i 's|(def plugin-release "[^"]*")|(def plugin-release "'"${LATEST}"'-SNAPSHOT")|' nu_plugin_edn
+
+          if git diff --quiet nu_plugin_edn; then
+            echo "::error::sed found no patterns to update — bailing out before commit"
+            exit 1
+          fi
 
           git checkout -b "$BRANCH"
           git add nu_plugin_edn
