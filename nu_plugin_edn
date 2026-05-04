@@ -115,6 +115,15 @@
 ;; legitimate keywords. Pair both flags for full round-trip.
 (def ^:dynamic *keep-keyword-prefix* false)
 
+;; Dynamic var `*string-keys*` (bound by handle-to-edn when --string-keys
+;; is on): when true, record keys emit as strings (`{"name" ...}`)
+;; instead of keywords (`{:name ...}`). Useful for pipelines feeding
+;; non-Clojure EDN consumers (Python, JS, Go) that don't speak
+;; keyword-keys. --keep-keyword-prefix's effect on keys is suppressed
+;; under --string-keys (string-keyed output is the goal); the value-side
+;; effect of --keep-keyword-prefix still works independently.
+(def ^:dynamic *string-keys* false)
+
 ;; Pragmatic check: ":foo", ":foo/bar", ":foo.bar-baz", etc. Rejects
 ;; ":" alone, ":foo bar" (whitespace), ":\"foo\"" (quotes). Doesn't
 ;; aim for full EDN spec compliance — just a heuristic for whether a
@@ -247,17 +256,23 @@
 
     (contains? v :Record)
     ;; Cheshire parses JSON object keys as Clojure keywords; (name k)
-    ;; gives back the original Nushell record-key string. With
-    ;; --keep-keyword-prefix, a key like ":foo" (placed there by `from
-    ;; edn --keep-keyword-prefix`) becomes the keyword :foo (drop the
-    ;; marker colon). Without the flag, keys pass through as-is and
-    ;; pr-str emits them as keywords.
+    ;; gives back the original Nushell record-key string. Key handling
+    ;; precedence:
+    ;;   --string-keys                wins → emit as Clojure string.
+    ;;   --keep-keyword-prefix on ":foo" → strip marker, emit as :foo.
+    ;;   default                          → keep cheshire's keyword as-is
+    ;;                                       (pr-str emits as keyword).
     (let [convert-key (fn [k]
-                        (if (and *keep-keyword-prefix*
-                                 (keyword? k)
-                                 (keyword-shaped? (name k)))
+                        (cond
+                          *string-keys*
+                          (if (keyword? k) (name k) (str k))
+
+                          (and *keep-keyword-prefix*
+                               (keyword? k)
+                               (keyword-shaped? (name k)))
                           (keyword (subs (name k) 1))
-                          k))
+
+                          :else k))
           m (into {} (for [[k vv] (get-in v [:Record :val])]
                        [(convert-key k) (nu->clj vv)]))]
       (if (and *record-as-set* (record-mirror-form? m))
@@ -751,6 +766,9 @@
                   :var_id nil :default_value nil}
                  {:long "keep-keyword-prefix" :short nil :arg nil :required false
                   :desc "Re-emit strings that look like keywords (start with `:`, valid name chars) as EDN keywords. Round-trip pair with `from edn --keep-keyword-prefix`. Without the pair, EDN keywords degrade to plain Nushell strings."
+                  :var_id nil :default_value nil}
+                 {:long "string-keys" :short nil :arg nil :required false
+                  :desc "Emit record keys as EDN strings ({\"name\" \"alice\"}) instead of keywords ({:name \"alice\"}). For pipelines feeding non-Clojure EDN consumers (Python/JS/Go) that don't speak keyword keys."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -872,7 +890,8 @@
 
       :else
       (binding [*record-as-set*       (flag-set? named "record2set")
-                *keep-keyword-prefix* (flag-set? named "keep-keyword-prefix")]
+                *keep-keyword-prefix* (flag-set? named "keep-keyword-prefix")
+                *string-keys*         (flag-set? named "string-keys")]
         (try
           (let [items (cond
                         (= "Empty" input)

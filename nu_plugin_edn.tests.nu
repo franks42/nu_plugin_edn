@@ -410,6 +410,33 @@ check "default: keyword still degrades to plain string" (
     '{:a :foo}' | from edn | get a
 ) "foo"
 
+# --- --string-keys ---
+# Emit record keys as EDN strings instead of keywords. Useful for
+# pipelines feeding non-Clojure consumers (Python/JS/Go) that don't
+# speak keyword keys.
+
+check "to edn --string-keys: simple record" (
+    {name: "alice", age: 30} | to edn --string-keys
+) '{"name" "alice", "age" 30}'
+
+check "to edn --string-keys: nested" (
+    {user: {name: "alice"}} | to edn --string-keys
+) '{"user" {"name" "alice"}}'
+
+check "to edn --string-keys: empty record" (
+    {} | to edn --string-keys
+) "{}"
+
+check "to edn (default): keys are still keywords" (
+    {name: "alice"} | to edn
+) '{:name "alice"}'
+
+# --string-keys + --keep-keyword-prefix combined: --string-keys wins
+# for keys; --keep-keyword-prefix still applies to values.
+check "to edn --string-keys --keep-keyword-prefix: keys string, values still keyword-coerced" (
+    {":a": ":foo"} | to edn --string-keys --keep-keyword-prefix
+) '{":a" :foo}'
+
 # --- error cases ---
 # Parse errors carry a source-span label pointing at the offending
 # location in the user's script (Value input only — ByteStream input
