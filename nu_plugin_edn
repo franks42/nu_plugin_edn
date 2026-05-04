@@ -100,6 +100,32 @@
 ;; trip. Default (false) → sets become Nushell lists.
 (def ^:dynamic *set-as-record* false)
 
+;; Dynamic var `*keep-keyword-prefix*` (bound by handle-from-edn AND
+;; handle-to-edn when --keep-keyword-prefix is on): when true,
+;; keyword/string fidelity is preserved across a round-trip by keeping
+;; the leading `:` as a marker on the Nushell-side string.
+;;   from edn --keep-keyword-prefix:  :foo  -> ":foo"   (string)
+;;                                    "bar" -> "bar"    (string)
+;;   to   edn --keep-keyword-prefix:  ":foo" -> :foo    (keyword)
+;;                                    "bar"  -> "bar"   (string)
+;; Heuristic: a string emits as a keyword iff it matches the keyword
+;; shape (`:` followed by valid name chars). Plain strings starting
+;; with `:` would coerce to keywords on the to-edn side; this is a
+;; documented one-way fidelity loss in exchange for round-trip of
+;; legitimate keywords. Pair both flags for full round-trip.
+(def ^:dynamic *keep-keyword-prefix* false)
+
+;; Pragmatic check: ":foo", ":foo/bar", ":foo.bar-baz", etc. Rejects
+;; ":" alone, ":foo bar" (whitespace), ":\"foo\"" (quotes). Doesn't
+;; aim for full EDN spec compliance — just a heuristic for whether a
+;; string the user typed as ":foo" looks like a keyword they want
+;; emitted as one.
+(def ^:private keyword-shaped-re
+  #":[^\s\"\(\)\[\]\{\}\\,;]+")
+
+(defn- keyword-shaped? [^String s]
+  (boolean (re-matches keyword-shaped-re s)))
+
 (defn- set-element-key
   "Stringify a set element to its mirror-record key. EDN keywords drop
   the leading colon (matching the rest of our keyword convention);
@@ -118,7 +144,10 @@
       (boolean? v)    {:Bool    {:val v :span span}}
       (integer? v)    {:Int     {:val v :span span}}
       (float? v)      {:Float   {:val (double v) :span span}}
-      (keyword? v)    {:String  {:val (subs (str v) 1) :span span}}
+      (keyword? v)    {:String  {:val (if *keep-keyword-prefix*
+                                        (str v)
+                                        (subs (str v) 1))
+                                 :span span}}
       (symbol? v)     {:String  {:val (str v) :span span}}
       ;; #inst literal — clojure.edn parses #inst into java.util.Date by
       ;; default; surface it as a Nushell Date so downstream pipelines
@@ -130,7 +159,10 @@
       (instance? java.util.UUID v)
       {:String {:val (str v) :span span}}
       (map? v)        {:Record  {:val (into {} (for [[k vv] v]
-                                                 [(if (keyword? k) (subs (str k) 1) (str k))
+                                                 [(cond
+                                                    (and *keep-keyword-prefix* (keyword? k)) (str k)
+                                                    (keyword? k)                              (subs (str k) 1)
+                                                    :else                                     (str k))
                                                   (->nu-value vv)]))
                                  :span span}}
       (sequential? v) {:List    {:vals (mapv ->nu-value v) :span span}}
@@ -186,7 +218,12 @@
 (defn nu->clj [v]
   (cond
     (contains? v :Nothing)  nil
-    (contains? v :String)   (get-in v [:String :val])
+    (contains? v :String)
+    (let [s (get-in v [:String :val])]
+      (if (and *keep-keyword-prefix* (keyword-shaped? s))
+        (keyword (subs s 1))
+        s))
+
     (contains? v :Bool)     (get-in v [:Bool :val])
     (contains? v :Int)      (get-in v [:Int :val])
     (contains? v :Float)    (get-in v [:Float :val])
@@ -209,8 +246,20 @@
                                        (get-in v [:Binary :val]))))
 
     (contains? v :Record)
-    (let [m (into {} (for [[k vv] (get-in v [:Record :val])]
-                       [k (nu->clj vv)]))]
+    ;; Cheshire parses JSON object keys as Clojure keywords; (name k)
+    ;; gives back the original Nushell record-key string. With
+    ;; --keep-keyword-prefix, a key like ":foo" (placed there by `from
+    ;; edn --keep-keyword-prefix`) becomes the keyword :foo (drop the
+    ;; marker colon). Without the flag, keys pass through as-is and
+    ;; pr-str emits them as keywords.
+    (let [convert-key (fn [k]
+                        (if (and *keep-keyword-prefix*
+                                 (keyword? k)
+                                 (keyword-shaped? (name k)))
+                          (keyword (subs (name k) 1))
+                          k))
+          m (into {} (for [[k vv] (get-in v [:Record :val])]
+                       [(convert-key k) (nu->clj vv)]))]
       (if (and *record-as-set* (record-mirror-form? m))
         ;; Mirror-form record + --record2set flag → emit as a set of
         ;; keywords (one per key). Treats the convention as "the
@@ -652,6 +701,9 @@
                   :var_id nil :default_value nil}
                  {:long "set2record" :short nil :arg nil :required false
                   :desc "Render EDN sets as Nushell records in mirror form ({k: k} where each key equals its stringified element) instead of lists. Round-trip pair with `to edn --record2set`. Lossy for non-keyword/string set elements (Nushell record keys are strings only)."
+                  :var_id nil :default_value nil}
+                 {:long "keep-keyword-prefix" :short nil :arg nil :required false
+                  :desc "Preserve keyword/string fidelity by keeping the leading `:` on keywords as a marker (`:foo` -> `\":foo\"`). Pair with `to edn --keep-keyword-prefix` for round-trip. Plain strings starting with `:` will coerce to keywords on the to-edn side — documented one-way fidelity loss."
                   :var_id nil :default_value nil}]
          :input_output_types [["String" "Any"]]
          :allow_variants_without_examples true
@@ -696,6 +748,9 @@
                   :var_id nil :default_value nil}
                  {:long "record2set" :short nil :arg nil :required false
                   :desc "If a record is in mirror form ({k: k} where every key equals its value), emit it as an EDN set instead of a map. Round-trip pair with `from edn --set2record`. Non-mirror records stay as maps."
+                  :var_id nil :default_value nil}
+                 {:long "keep-keyword-prefix" :short nil :arg nil :required false
+                  :desc "Re-emit strings that look like keywords (start with `:`, valid name chars) as EDN keywords. Round-trip pair with `from edn --keep-keyword-prefix`. Without the pair, EDN keywords degrade to plain Nushell strings."
                   :var_id nil :default_value nil}]
          :input_output_types [["Any" "String"]]
          :allow_variants_without_examples true
@@ -729,7 +784,8 @@
         named  (get-in run [:call :named])
         multi? (or (flag-set? named "lines")
                    (flag-set? named "objects"))]
-    (binding [*set-as-record* (flag-set? named "set2record")]
+    (binding [*set-as-record*       (flag-set? named "set2record")
+              *keep-keyword-prefix* (flag-set? named "keep-keyword-prefix")]
       (cond
         ;; Multi-form mode + ByteStream  ->  truly incremental streaming.
         ;; Bytes are pulled on demand; forms are emitted as they're parsed.
@@ -815,7 +871,8 @@
        "to edn requires a structured value or list-stream input (got raw bytes)")
 
       :else
-      (binding [*record-as-set* (flag-set? named "record2set")]
+      (binding [*record-as-set*       (flag-set? named "record2set")
+                *keep-keyword-prefix* (flag-set? named "keep-keyword-prefix")]
         (try
           (let [items (cond
                         (= "Empty" input)

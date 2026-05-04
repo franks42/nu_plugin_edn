@@ -362,6 +362,54 @@ check "set2record + record2set: round-trip preserves keyword set" (
     | sort
 ) ["admin" "editor" "viewer"]
 
+# --- --keep-keyword-prefix paired flag ---
+# Preserves keyword/string fidelity by carrying the leading `:` as a
+# marker on the Nushell-side string. Pair both flags for round-trip.
+
+check "from edn --keep-keyword-prefix: keyword value keeps colon" (
+    '{:a :foo}' | from edn --keep-keyword-prefix | get :a
+) ":foo"
+
+check "from edn --keep-keyword-prefix: namespaced keyword keeps colon" (
+    '{:k :foo/bar}' | from edn --keep-keyword-prefix | get :k
+) ":foo/bar"
+
+check "from edn --keep-keyword-prefix: plain string stays plain" (
+    '{:a "hello"}' | from edn --keep-keyword-prefix | get :a
+) "hello"
+
+check "from edn --keep-keyword-prefix: keyword keys keep colon" (
+    '{:a 1}' | from edn --keep-keyword-prefix | columns
+) [":a"]
+
+check "to edn --keep-keyword-prefix: prefixed string emits as keyword" (
+    {":a": ":foo"} | to edn --keep-keyword-prefix
+) '{:a :foo}'
+
+check "to edn --keep-keyword-prefix: plain string stays string" (
+    {a: "hello"} | to edn --keep-keyword-prefix
+) '{:a "hello"}'
+
+# Full round-trip: EDN keywords survive intact through both flags.
+check "keep-keyword-prefix: round-trips keywords" (
+    '{:a :foo, :b "bar", :c :ns/qual}'
+    | from edn --keep-keyword-prefix
+    | to edn --keep-keyword-prefix
+    | from edn --keep-keyword-prefix
+    | get :a
+) ":foo"
+
+check "keep-keyword-prefix: round-trip preserves string-vs-keyword distinction" (
+    '{:k :v, :s "v"}'
+    | from edn --keep-keyword-prefix
+    | to edn --keep-keyword-prefix
+) '{:k :v, :s "v"}'
+
+# Default behaviour unchanged when flag is off.
+check "default: keyword still degrades to plain string" (
+    '{:a :foo}' | from edn | get a
+) "foo"
+
 # --- error cases ---
 # Parse errors carry a source-span label pointing at the offending
 # location in the user's script (Value input only — ByteStream input
