@@ -102,6 +102,53 @@ bb -e '(doseq [event (events)] (prn event))' | from edn --lines | first 10
 bb produce.clj | from edn | where size > 1000 | sort-by size | to edn | bb consume.clj
 ```
 
+### Pretty-printing EDN
+
+For demos and human-readable inspection, a tiny `pprint-edn` filter is a
+few lines of bb. Drop this into your `config.nu`:
+
+```nu
+# Pretty-print EDN bytes from stdin (uses bb's stdlib clojure.pprint).
+def pprint-edn [] {
+    ^bb -e '(require (quote [clojure.pprint :as pp]))
+            (pp/pprint (clojure.edn/read-string (slurp *in*)))'
+}
+```
+
+Then:
+
+```nu
+{user: "alice" roles: [admin reviewer] active: true} | to edn | pprint-edn
+# {:user "alice",
+#  :roles [admin reviewer],
+#  :active true}
+
+cat config.edn | pprint-edn
+```
+
+(There's no `^pprint-edn` external CLI in the ecosystem yet — `clojure.pprint`
+is in bb's stdlib, so a Nushell custom command is enough; no separate library
+to wrap.)
+
+### Composing with the wider Clojure-shaped Nushell ecosystem
+
+[`cedn`](https://github.com/franks42/canonical-edn) (canonical-EDN filter) and
+[`uuidv7`](https://github.com/franks42/uuidv7.cljc) (UUIDv7 generator/parser/
+validator) are sibling tools — single bb-script CLIs released alongside their
+reference libraries. They compose with `nu_plugin_edn` via Unix pipes:
+
+```nu
+# Hash a structured payload's canonical form
+{user: "alice" scope: read} | to edn | ^cedn | sha256sum
+
+# Pull a UUIDv7's embedded timestamp into Nushell
+^uuidv7 parse "0195a4c8-fae8-7c8d-b2a1-..." | from edn | get datetime
+
+# Round-trip via canonical EDN
+{b: 2 a: 1} | to edn | ^cedn | from edn   # => {a: 1, b: 2}
+```
+
+
 ## Type mappings (`to edn`)
 
 | Nushell type      | EDN output                | Notes                          |
