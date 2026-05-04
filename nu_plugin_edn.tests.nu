@@ -511,6 +511,25 @@ check "error: --lines mode also carries source-span label on bad form" (
     }
 ) true
 
+# Mid-stream parse errors over a ByteStream can't switch a ListStream
+# response into an Error response (protocol limitation), so the plugin
+# emits a Value::Error as the final list element. Downstream sees it
+# as either a top-level error or as something try/catch picks up.
+
+check "error: mid-stream parse error in ByteStream --lines surfaces as an error" (
+    try {
+        ^bb -e '(prn 1) (prn 2) (println "{:bad")' | from edn --lines | each { |x| $x }
+        "no error"
+    } catch { |_| "error" }
+) "error"
+
+check "error: mid-stream error message starts with EDN parse error" (
+    try {
+        ^bb -e '(prn 1) (println "{:bad")' | from edn --lines | each { |x| $x }
+        ""
+    } catch { |e| $e.msg | str starts-with "EDN parse error:" }
+) true
+
 # --- Ecosystem integration ---
 # Tests that exercise composition with adjacent CLI tools from the
 # wider Clojure-shaped Nushell ecosystem (cedn, uuidv7). They run

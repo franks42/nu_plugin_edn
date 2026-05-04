@@ -610,6 +610,22 @@
         ;; No-op — stdin is owned by the main loop, not us.
         nil))))
 
+;; Build a Nushell Value::Error suitable for inline emission inside a
+;; ListStream. The protocol can't switch a ListStream into an Error
+;; response mid-flight, so the only way to surface a parse failure
+;; that occurs after we've started emitting :Data is to emit the
+;; error AS a list element. ShellError serializes as LabeledError
+;; (same shape as our top-level error response), so the inner :error
+;; map mirrors the field set in send-error-response.
+(defn- error-value [msg]
+  {:Error {:error {:msg    msg
+                   :labels []
+                   :code   nil
+                   :url    nil
+                   :help   nil
+                   :inner  []}
+           :span  {:start 0 :end 0}}})
+
 (defn emit-stream-incremental [call-id in-sid]
   (let [out-sid    (alloc-stream-id)
         out-state  (atom {:out-sid out-sid :dropped? false})
@@ -633,10 +649,17 @@
                   (recur))))))
       (catch Throwable t
         ;; Mid-stream parse error: we already opened a ListStream, so
-        ;; we can't switch to an Error response. Log to stderr; the
-        ;; user sees a truncated stream. Adding an embedded Error value
-        ;; as a final list element would be a polish improvement.
-        (log "parse error during incremental streaming:" (.getMessage t))))
+        ;; we can't switch to an :Error response. Emit a Value::Error
+        ;; as the final list element so downstream sees the failure
+        ;; inline (and `try/catch` can pick it up). Log to stderr too
+        ;; for visibility during debugging. Unwrap the cause to get
+        ;; the readable message — clojure.edn wraps inner exceptions
+        ;; in EdnReader$ReaderException which prefixes with the class
+        ;; name in .getMessage.
+        (let [inner (or (some-> (.getCause t) .getMessage) (.getMessage t))
+              msg   (str "EDN parse error: " inner)]
+          (log "parse error during incremental streaming:" msg)
+          (send-msg {:Data [out-sid {:List (error-value msg)}]}))))
     ;; If we exited before the producer's End — i.e. `| first N` Drop'd
     ;; us early — tell the engine to tear down the producer. For an
     ;; unbounded source like `tail -f`, this is the only way to make it
