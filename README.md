@@ -43,7 +43,7 @@ minors (when they happen) get a `-N` patch suffix
 
 ### 1. Install Nushell
 
-If you don't already have it, follow [the Nushell install guide](https://www.nushell.sh/install/)
+If you don't already have it, follow [the Nushell install guide](https://www.nushell.sh/book/installation.html)
 (Homebrew, winget, cargo, scoop, distro packages — pick one). Confirm with `nu --version`. The plugin
 is anchored to a specific Nushell version (see [Versioning](#versioning)) — note your version, you'll
 match the plugin to it in step 3.
