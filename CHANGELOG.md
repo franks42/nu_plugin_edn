@@ -8,7 +8,7 @@ once a 1.0 ships.
 
 ## [Unreleased]
 
-(Active dev cycle. Drop the `-SNAPSHOT` suffix on `plugin-release` before tagging the next release.)
+(Active dev cycle. `plugin-release` is `0.112.2-3-SNAPSHOT`. Drop the suffix before tagging the next release.)
 
 ## [0.112.2-2] — 2026-05-04 — flag-pair completion + spans + drift fix
 
