@@ -104,6 +104,33 @@ produce via `(sha256 (cedn/canonical-bytes v))`.
 ^uuidv7 parse $some-uuid | from edn | get datetime
 ```
 
+### Calling nu from another language (bb, Python, …)
+
+If you're driving the pipeline from a host language rather than typing
+nu directly:
+
+```clojure
+;; babashka — pipe EDN in, parse EDN out
+(require '[babashka.process :as p] '[clojure.edn :as edn])
+
+(-> (p/sh {:in "[{:size 100} {:size 200}]"}
+          "nu" "--stdin" "-c" "from edn | where size > 100 | to edn")
+    :out
+    edn/read-string)
+;; => [{:size 200}]
+```
+
+**Use `nu --stdin -c '...'`, not just `nu -c '...'`.** Without `--stdin`,
+the parent's stdin doesn't propagate to the pipeline's first command,
+and `from edn` errors with "Pipeline empty / no input value was piped
+in." This is the single non-obvious mechanical gotcha for bb↔nu /
+python↔nu / shell↔nu calls.
+
+A working PoC with helper functions (`nu->`, `nu->edn`), strict EDN
+parsing (catches the table-rendering-as-symbol trap), bundled
+`^cedn`/`^uuidv7` binaries, and a Quarto + Babqua live-render notebook
+lives at <https://github.com/franks42/babqua-bb-nushell-demo>.
+
 ## Gotchas (in order of how often you'll trip on them)
 
 1. **Records use `:` for `key: value`, not `"key": value`.** Nushell record

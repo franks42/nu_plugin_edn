@@ -323,6 +323,16 @@ external CLIs** (`^cedn` for canonicalization, `^uuidv7` for ID generation, futu
 `nu_plugin_edn` is the only piece that needs to be a Nushell plugin — everything else is a regular
 external command piped through `^name` syntax.
 
+#### `babqua-bb-nushell-demo` — the same pattern inside a notebook
+
+[`babqua-bb-nushell-demo`](https://github.com/franks42/babqua-bb-nushell-demo) is a Quarto +
+[Babqua](https://scicloj.github.io/babqua/) notebook that runs nu pipelines from inside
+`{.clojure .bb}` code blocks. Demonstrates the typed-value boundary principle interactively —
+typed transforms inside Nushell on one side of `from edn` / `to edn`, byte-level transforms via
+`^cedn` / `^uuidv7` / `sha256sum` on the other side, all rendered live via Kindly metadata
+(table, chart, hash). Self-contained: bundled `bin/` ships the sibling CLIs, no system installs
+needed.
+
 
 ## Type mappings (`to edn`)
 
